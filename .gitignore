@@ -67,3 +67,6 @@ yarn-error.log*
 CLAUDE.md
 settings.local.json
 
+# Local working docs
+docs/
+
