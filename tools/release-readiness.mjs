@@ -6,6 +6,7 @@ import { ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
 
 const repoRoot = process.cwd();
 const promptReportPath = path.join(repoRoot, "docs", "plansv3", "reports", "08-prompt-regression-latest.json");
+const reliabilityReportPath = path.join(repoRoot, "docs", "plansv5", "reports", "07-phase-5-reliability-smoke-latest.json");
 const outputPath = path.join(repoRoot, "docs", "plansv3", "reports", "09-release-readiness-latest.json");
 
 const legacyRequiredTools = [
@@ -78,6 +79,9 @@ const v3Matrix = countPresent(v3RequiredTools, toolNames);
 const promptReport = fs.existsSync(promptReportPath)
   ? JSON.parse(fs.readFileSync(promptReportPath, "utf8"))
   : null;
+const reliabilityReport = fs.existsSync(reliabilityReportPath)
+  ? JSON.parse(fs.readFileSync(reliabilityReportPath, "utf8"))
+  : null;
 
 const report = {
   generatedAt: new Date().toISOString(),
@@ -97,6 +101,14 @@ const report = {
         sampleSize: promptReport.summary.total,
         intentPass: promptReport.summary.intentPass,
         hintPass: promptReport.summary.hintPass
+      }
+    : null,
+  reliabilitySnapshot: reliabilityReport
+    ? {
+        generatedAt: reliabilityReport.generatedAt || null,
+        passed: reliabilityReport.summary?.passed ?? null,
+        total: reliabilityReport.summary?.total ?? null,
+        passRate: reliabilityReport.summary?.passRate ?? null
       }
     : null,
   releaseDecision: legacyMatrix.missing.length === 0 && v3Matrix.missing.length === 0

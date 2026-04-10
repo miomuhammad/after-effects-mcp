@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type {
   BuildQueuedBridgeToolResponse,
+  ExecuteCommandThroughSafetyBound,
   ExecuteBridgeCommandAndWait,
   FormatToolPayload,
   QueueMutationWithSafety,
@@ -35,6 +36,7 @@ export function registerBridgeTools(deps: {
   getSavedProjectInfoForSafety: (executeBridgeCommandAndWait: ExecuteBridgeCommandAndWait) => Promise<any>;
   createProjectCheckpoint: (label: string | undefined, deps: { executeBridgeCommandAndWait: ExecuteBridgeCommandAndWait }) => Promise<any>;
   executeBridgeCommandAndWait: ExecuteBridgeCommandAndWait;
+  executeCommandThroughSafety: ExecuteCommandThroughSafetyBound;
   listCheckpointEntries: (projectPath: string) => any;
   resolveCheckpointEntry: (projectPath: string, checkpointId?: string) => any;
   buildBranchBeforeRestorePath: (projectPath: string, checkpointId: string) => string;
@@ -68,6 +70,7 @@ export function registerBridgeTools(deps: {
     getSavedProjectInfoForSafety,
     createProjectCheckpoint,
     executeBridgeCommandAndWait,
+    executeCommandThroughSafety,
     listCheckpointEntries,
     resolveCheckpointEntry,
     buildBranchBeforeRestorePath,
@@ -379,12 +382,17 @@ export function registerBridgeTools(deps: {
 
   server.tool(
     "run-script",
-    "Run a read-only script in After Effects",
+    "Run a bridge script in After Effects. Defaults to deterministic execute-and-wait; queue-only mode is available for manual workflows.",
     {
       script: z.string().describe("Name of the predefined script to run"),
-      parameters: z.record(z.string(), z.unknown()).optional().describe("Optional parameters for the script")
+      parameters: z.record(z.string(), z.unknown()).optional().describe("Optional parameters for the script"),
+      executionMode: z.enum(["execute_and_wait", "queue_only"]).optional().describe("Execution contract. Defaults to execute_and_wait.")
     },
-    async ({ script, parameters = {} }: { script: string; parameters?: Record<string, unknown> }) => {
+    async ({ script, parameters = {}, executionMode = "execute_and_wait" }: {
+      script: string;
+      parameters?: Record<string, unknown>;
+      executionMode?: "execute_and_wait" | "queue_only";
+    }) => {
       const allowedScripts = [
         "getProjectItems",
         "findProjectItem",
@@ -446,18 +454,69 @@ export function registerBridgeTools(deps: {
 
       try {
         const safety = classifyMutationRisk(script);
-        if (safety.isMutation) {
-          const payload = await queueMutationWithSafety(script, parameters, { allowForceWithoutCheckpoint: true }, safetyRoutingDependencies);
-          return formatToolPayload(payload);
+        const sanitizedParameters = sanitizeMutationArgs(parameters);
+
+        if (executionMode === "queue_only") {
+          if (safety.isMutation) {
+            const payload = await queueMutationWithSafety(script, sanitizedParameters, { allowForceWithoutCheckpoint: true }, safetyRoutingDependencies);
+            return formatToolPayload(payload);
+          }
+
+          const commandId = await queueBridgeCommand(script, sanitizedParameters);
+          return formatToolPayload({
+            status: "queued",
+            command: script,
+            commandId,
+            message: `Command "${script}" has been queued.\nCommand ID: ${commandId}\nPlease ensure the "MCP Bridge Auto" panel is open in After Effects.\nUse the "get-results" tool after a few seconds to check for results.`
+          });
         }
 
-        const commandId = await queueBridgeCommand(script, sanitizeMutationArgs(parameters));
-        return formatToolPayload({
-          status: "queued",
-          command: script,
-          commandId,
-          message: `Command "${script}" has been queued.\nCommand ID: ${commandId}\nPlease ensure the "MCP Bridge Auto" panel is open in After Effects.\nUse the "get-results" tool after a few seconds to check for results.`
+        if (safety.isMutation) {
+          const executed = await executeCommandThroughSafety(script, sanitizedParameters, {
+            timeoutMs: 12000,
+            allowForceWithoutCheckpoint: true
+          });
+
+          if (executed.ok) {
+            return formatToolPayload({
+              status: "success",
+              command: script,
+              retries: executed.retries,
+              failureClass: executed.failureClass || null,
+              result: executed.result
+            });
+          }
+
+          return formatToolPayload({
+            status: "error",
+            command: script,
+            retries: executed.retries,
+            failureClass: executed.failureClass || null,
+            result: executed.result
+          }, true);
+        }
+
+        const executed = await executeBridgeCommandAndWait(script, sanitizedParameters, {
+          timeoutMs: 8000,
+          maxAttempts: 2
         });
+        if (executed.ok) {
+          return formatToolPayload({
+            status: "success",
+            command: script,
+            retries: executed.retries,
+            failureClass: executed.failureClass || null,
+            result: executed.result
+          });
+        }
+
+        return formatToolPayload({
+          status: "error",
+          command: script,
+          retries: executed.retries,
+          failureClass: executed.failureClass || null,
+          result: executed.result
+        }, true);
       } catch (error) {
         return formatToolPayload(
           buildStructuredSafetyError(error, "RUN_SCRIPT_FAILED", "Failed to queue the requested script."),

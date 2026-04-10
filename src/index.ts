@@ -181,6 +181,7 @@ registerBridgeTools({
   getSavedProjectInfoForSafety,
   createProjectCheckpoint,
   executeBridgeCommandAndWait,
+  executeCommandThroughSafety: executeCommandThroughSafetyBound,
   listCheckpointEntries,
   resolveCheckpointEntry,
   buildBranchBeforeRestorePath,

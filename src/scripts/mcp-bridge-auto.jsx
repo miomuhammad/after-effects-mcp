@@ -3579,6 +3579,7 @@ var lastPollAt = null;
 var lastCommandSeen = null;
 var lastCommandCompleted = null;
 var lastBridgeError = null;
+var runningCommandTimeoutMs = 45000;
 
 // Command file path - use Documents folder for reliable access
 function getCommandFilePath() {
@@ -3655,7 +3656,36 @@ function writeResultPayload(resultString, commandData) {
     }
 }
 
-function listPendingJournalCommands() {
+function parseTimestampSafe(value) {
+    if (!value) {
+        return null;
+    }
+    try {
+        var text = String(value);
+        // Expected format: YYYY-MM-DDTHH:mm:ss.sssZ
+        var match = text.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/);
+        if (match) {
+            var year = parseInt(match[1], 10);
+            var month = parseInt(match[2], 10) - 1;
+            var day = parseInt(match[3], 10);
+            var hour = parseInt(match[4], 10);
+            var minute = parseInt(match[5], 10);
+            var second = parseInt(match[6], 10);
+            var milli = match[7] ? parseInt((match[7] + "00").substring(0, 3), 10) : 0;
+            var utcMs = Date.UTC(year, month, day, hour, minute, second, milli);
+            return isNaN(utcMs) ? null : utcMs;
+        }
+
+        // Fallback for other date string formats
+        var dt = new Date(text);
+        var fallbackMs = dt.getTime();
+        return isNaN(fallbackMs) ? null : fallbackMs;
+    } catch (e) {
+        return null;
+    }
+}
+
+function collectJournalCommandsByStatus(statusList) {
     var folder = new Folder(getCommandsFolderPath());
     if (!folder.exists) {
         return [];
@@ -3664,31 +3694,112 @@ function listPendingJournalCommands() {
     if (!files || !files.length) {
         return [];
     }
-    var pending = [];
+    var target = {};
+    for (var s = 0; s < statusList.length; s++) {
+        target[String(statusList[s])] = true;
+    }
+    var collected = [];
     for (var i = 0; i < files.length; i++) {
         if (!(files[i] instanceof File)) {
             continue;
         }
         var parsed = readJsonFile(files[i].fsName);
-        if (!parsed) {
+        if (!parsed || !target[String(parsed.status)]) {
             continue;
         }
-        if (parsed.status !== "pending") {
-            continue;
-        }
-        pending.push({
+        collected.push({
             file: files[i],
-            data: parsed,
-            timestamp: parsed.timestamp || ""
+            data: parsed
         });
     }
+    return collected;
+}
+
+function listPendingJournalCommands() {
+    var pending = collectJournalCommandsByStatus(["pending"]);
     pending.sort(function(a, b) {
-        if (a.timestamp === b.timestamp) {
+        var aTs = a.data && a.data.timestamp ? String(a.data.timestamp) : "";
+        var bTs = b.data && b.data.timestamp ? String(b.data.timestamp) : "";
+        if (aTs === bTs) {
             return a.file.name < b.file.name ? -1 : (a.file.name > b.file.name ? 1 : 0);
         }
-        return a.timestamp < b.timestamp ? -1 : 1;
+        return aTs < bTs ? -1 : 1;
     });
     return pending;
+}
+
+function isCommandStuck(commandData, nowMs) {
+    if (!commandData || commandData.status !== "running") {
+        return false;
+    }
+    var startedMs = parseTimestampSafe(commandData.runningSince) || parseTimestampSafe(commandData.timestamp);
+    if (startedMs === null) {
+        return false;
+    }
+    return (nowMs - startedMs) > runningCommandTimeoutMs;
+}
+
+function markCommandAsStuckError(commandData, sourceTag) {
+    try {
+        if (!commandData || !commandData.command) {
+            return false;
+        }
+        var nowIso = getIsoTimestamp();
+        var errorResult = normalizeCommandResult(commandData.command, commandData.args || {}, commandData, {
+            status: "error",
+            failureClass: "stuck-running",
+            message: "Command exceeded running timeout and was marked as failed by bridge watchdog.",
+            source: sourceTag || "watchdog",
+            timeoutMs: runningCommandTimeoutMs
+        });
+        writeResultPayload(errorResult, commandData);
+        updateCommandStatus("error", commandData);
+        lastBridgeError = {
+            message: "Watchdog marked stuck running command as error.",
+            command: commandData.command,
+            commandId: commandData.commandId || null,
+            timeoutMs: runningCommandTimeoutMs,
+            timestamp: nowIso
+        };
+        lastCommandCompleted = {
+            command: commandData.command,
+            commandId: commandData.commandId || null,
+            completedAt: nowIso,
+            status: "error"
+        };
+        writeBridgeHealth("error", {
+            reason: "watchdog-stuck-running",
+            command: commandData.command,
+            commandId: commandData.commandId || null
+        });
+        logToPanel("Watchdog flagged stuck running command: " + commandData.command + " (" + (commandData.commandId || "no-id") + ")");
+        return true;
+    } catch (e) {
+        logToPanel("Watchdog failed to mark stuck command: " + e.toString());
+        return false;
+    }
+}
+
+function enforceRunningCommandWatchdog() {
+    var nowMs = new Date().getTime();
+    var resolved = false;
+
+    // Journal-first running command scan
+    var runningJournal = collectJournalCommandsByStatus(["running"]);
+    for (var i = 0; i < runningJournal.length; i++) {
+        var commandData = runningJournal[i].data;
+        if (isCommandStuck(commandData, nowMs)) {
+            resolved = markCommandAsStuckError(commandData, "journal-watchdog") || resolved;
+        }
+    }
+
+    // Legacy mirror fallback
+    var legacy = readJsonFile(getCommandFilePath());
+    if (legacy && isCommandStuck(legacy, nowMs)) {
+        resolved = markCommandAsStuckError(legacy, "legacy-watchdog") || resolved;
+    }
+
+    return resolved;
 }
 
 function writeBridgeHealth(status, extra) {
@@ -5235,6 +5346,9 @@ function updateCommandStatus(status, commandData) {
                 continue;
             }
             parsed.status = status;
+            if (status === "running") {
+                parsed.runningSince = getIsoTimestamp();
+            }
             writeTextFile(commandFilePath, JSON.stringify(parsed, null, 2));
             updated = true;
         }
@@ -5283,6 +5397,8 @@ function checkForCommands() {
     writeBridgeHealth("polling", null);
     
     try {
+        enforceRunningCommandWatchdog();
+
         var commandData = null;
         var pendingJournal = listPendingJournalCommands();
         if (pendingJournal.length > 0) {
