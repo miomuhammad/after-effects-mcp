@@ -12,6 +12,11 @@ export function registerBridgeTools(deps: {
   server: ToolServer;
   fs: typeof import("fs");
   getOperationLogPath: () => string;
+  getAECommandFilePath: () => string;
+  getAEResultFilePath: () => string;
+  getAEHealthFilePath: () => string;
+  getAECommandQueueDirPath: () => string;
+  getAEResultQueueDirPath: () => string;
   withBridgeRoundTripLock: <T>(work: () => Promise<T>) => Promise<T>;
   queueBridgeCommand: (command: string, args?: Record<string, any>) => Promise<string>;
   waitForBridgeResult: (options?: { expectedCommand?: string; expectedCommandId?: string; timeoutMs?: number; pollMs?: number }) => Promise<string>;
@@ -41,6 +46,11 @@ export function registerBridgeTools(deps: {
     server,
     fs,
     getOperationLogPath,
+    getAECommandFilePath,
+    getAEResultFilePath,
+    getAEHealthFilePath,
+    getAECommandQueueDirPath,
+    getAEResultQueueDirPath,
     withBridgeRoundTripLock,
     queueBridgeCommand,
     waitForBridgeResult,
@@ -66,6 +76,21 @@ export function registerBridgeTools(deps: {
     safetyRoutingDependencies
   } = deps;
 
+  const readJsonFileIfExists = (filePath: string) => {
+    if (!fs.existsSync(filePath)) {
+      return { exists: false, parsed: null as any, raw: null as string | null, mtimeIso: null as string | null };
+    }
+    const stats = fs.statSync(filePath);
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = safeJsonParse(raw);
+    return {
+      exists: true,
+      parsed,
+      raw,
+      mtimeIso: stats.mtime.toISOString()
+    };
+  };
+
   server.resource(
     "compositions",
     "aftereffects://compositions",
@@ -82,6 +107,273 @@ export function registerBridgeTools(deps: {
           text: result
         }]
       };
+    }
+  );
+
+  server.tool(
+    "inspect-bridge-health",
+    "Inspect bridge health heartbeat, command slot state, and latest result freshness for fast transport diagnosis.",
+    {
+      staleSeconds: z.number().int().positive().max(600).optional().describe("Heartbeat freshness threshold in seconds. Default 10.")
+    },
+    async ({ staleSeconds = 10 }: { staleSeconds?: number }) => {
+      try {
+        const commandPath = getAECommandFilePath();
+        const resultPath = getAEResultFilePath();
+        const healthPath = getAEHealthFilePath();
+
+        const commandFile = readJsonFileIfExists(commandPath);
+        const resultFile = readJsonFileIfExists(resultPath);
+        const healthFile = readJsonFileIfExists(healthPath);
+
+        const heartbeatTimestampRaw = String(healthFile.parsed?.lastPollAt || "");
+        const heartbeatTimestamp = heartbeatTimestampRaw ? Date.parse(heartbeatTimestampRaw) : NaN;
+        const heartbeatAgeMs = Number.isNaN(heartbeatTimestamp) ? null : (Date.now() - heartbeatTimestamp);
+
+        const autoRunEnabled = healthFile.parsed?.autoRunEnabled;
+        const resultIsPlaceholder = resultFile.parsed?.status === "waiting" && resultFile.parsed?._placeholder === true;
+        const commandStatus = String(commandFile.parsed?.status || "");
+
+        let healthClass: "healthy" | "warning" | "error" = "healthy";
+        let diagnosis = "Bridge transport appears healthy.";
+        if (!healthFile.exists) {
+          healthClass = "error";
+          diagnosis = "Bridge heartbeat file is missing. The panel may not be running.";
+        } else if (autoRunEnabled === false) {
+          healthClass = "error";
+          diagnosis = "Bridge heartbeat is live, but auto-run is disabled.";
+        } else if (heartbeatAgeMs !== null && heartbeatAgeMs > staleSeconds * 1000) {
+          healthClass = "error";
+          diagnosis = `Bridge heartbeat is stale (${Math.round(heartbeatAgeMs / 1000)}s old).`;
+        } else if ((commandStatus === "pending" || commandStatus === "running") && resultIsPlaceholder) {
+          healthClass = "warning";
+          diagnosis = "Command slot is active but result is still placeholder waiting.";
+        }
+
+        return formatToolPayload({
+          status: healthClass === "error" ? "error" : "success",
+          bridgeHealthClass: healthClass,
+          diagnosis,
+          staleThresholdSeconds: staleSeconds,
+          files: {
+            command: {
+              path: commandPath,
+              exists: commandFile.exists,
+              mtime: commandFile.mtimeIso,
+              status: commandFile.parsed?.status || null,
+              command: commandFile.parsed?.command || null,
+              commandId: commandFile.parsed?.commandId || null
+            },
+            result: {
+              path: resultPath,
+              exists: resultFile.exists,
+              mtime: resultFile.mtimeIso,
+              status: resultFile.parsed?.status || null,
+              command: resultFile.parsed?._commandExecuted || resultFile.parsed?.command || null,
+              commandId: resultFile.parsed?._commandId || resultFile.parsed?.commandId || null,
+              placeholder: resultIsPlaceholder
+            },
+            heartbeat: {
+              path: healthPath,
+              exists: healthFile.exists,
+              mtime: healthFile.mtimeIso,
+              status: healthFile.parsed?.status || null,
+              autoRunEnabled: autoRunEnabled === true,
+              panelRunning: healthFile.parsed?.panelRunning === true,
+              isChecking: healthFile.parsed?.isChecking === true,
+              lastPollAt: healthFile.parsed?.lastPollAt || null,
+              heartbeatAgeMs
+            }
+          },
+          nextAction: healthClass === "healthy"
+            ? "Proceed with normal queue/wait flow."
+            : "Reopen the MCP Bridge Auto panel, ensure Auto-run is enabled, then retry."
+        }, healthClass === "error");
+      } catch (error) {
+        return formatToolPayload({
+          status: "error",
+          message: `Failed to inspect bridge health: ${String(error)}`
+        }, true);
+      }
+    }
+  );
+
+  server.tool(
+    "recover-bridge-state",
+    "Apply safe recovery actions for stale bridge placeholders and orphan pending/running command slot state.",
+    {
+      resetResultPlaceholder: z.boolean().optional().describe("Rewrite result file to a fresh waiting placeholder. Default true."),
+      resetCommandStatus: z.enum(["none", "completed", "error"]).optional().describe("Optionally rewrite active command status when slot is stuck.")
+    },
+    async ({ resetResultPlaceholder = true, resetCommandStatus = "none" }: { resetResultPlaceholder?: boolean; resetCommandStatus?: "none" | "completed" | "error" }) => {
+      try {
+        const commandPath = getAECommandFilePath();
+        const resultPath = getAEResultFilePath();
+        const recoveryAt = new Date().toISOString();
+        const actions: string[] = [];
+
+        if (resetResultPlaceholder) {
+          const placeholder = {
+            status: "waiting",
+            message: "Waiting for new result from After Effects...",
+            command: null,
+            commandId: null,
+            timestamp: recoveryAt,
+            _placeholder: true,
+            _recoveredBy: "recover-bridge-state"
+          };
+          fs.writeFileSync(resultPath, JSON.stringify(placeholder, null, 2), "utf8");
+          actions.push("result-placeholder-reset");
+        }
+
+        if (resetCommandStatus !== "none" && fs.existsSync(commandPath)) {
+          const raw = fs.readFileSync(commandPath, "utf8");
+          const parsed = safeJsonParse(raw);
+          if (parsed && (parsed.status === "pending" || parsed.status === "running")) {
+            parsed.status = resetCommandStatus;
+            parsed.recoveredAt = recoveryAt;
+            parsed.recoveredBy = "recover-bridge-state";
+            fs.writeFileSync(commandPath, JSON.stringify(parsed, null, 2), "utf8");
+            actions.push(`command-status-set-${resetCommandStatus}`);
+          }
+        }
+
+        return formatToolPayload({
+          status: "success",
+          message: actions.length ? "Bridge recovery actions applied." : "No recovery action was needed.",
+          actions,
+          commandPath,
+          resultPath
+        });
+      } catch (error) {
+        return formatToolPayload({
+          status: "error",
+          message: `Failed to recover bridge state: ${String(error)}`
+        }, true);
+      }
+    }
+  );
+
+  server.tool(
+    "cleanup-bridge-journal",
+    "Clean old bridge journal entries in commands/results directories with optional dry-run.",
+    {
+      dryRun: z.boolean().optional().describe("When true, only report candidates without deleting."),
+      maxAgeHours: z.number().positive().max(24 * 365).optional().describe("Delete files older than this age in hours. Default 168 (7 days)."),
+      maxFilesPerDir: z.number().int().positive().max(5000).optional().describe("Keep at most this many newest files per directory. Default 300.")
+    },
+    async ({ dryRun = true, maxAgeHours = 168, maxFilesPerDir = 300 }: { dryRun?: boolean; maxAgeHours?: number; maxFilesPerDir?: number }) => {
+      try {
+        const commandDir = getAECommandQueueDirPath();
+        const resultDir = getAEResultQueueDirPath();
+        const cutoffMs = Date.now() - Math.round(maxAgeHours * 60 * 60 * 1000);
+
+        const collectCandidates = (dirPath: string, skipActiveCommands: boolean) => {
+          if (!fs.existsSync(dirPath)) {
+            return {
+              dirPath,
+              scanned: 0,
+              candidates: [] as Array<{ path: string; reason: "age" | "cap" | "age+cap"; mtime: string }>
+            };
+          }
+
+          const files = fs.readdirSync(dirPath)
+            .filter((name) => name.toLowerCase().endsWith(".json"))
+            .map((name) => {
+              const filePath = `${dirPath}/${name}`.replace(/\\/g, "/");
+              const stats = fs.statSync(filePath);
+              return {
+                name,
+                filePath,
+                mtimeMs: stats.mtimeMs,
+                mtime: stats.mtime.toISOString()
+              };
+            })
+            .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+          const keepSet = new Set(files.slice(0, maxFilesPerDir).map((entry) => entry.filePath));
+          const candidates: Array<{ path: string; reason: "age" | "cap" | "age+cap"; mtime: string }> = [];
+
+          for (const file of files) {
+            const byAge = file.mtimeMs < cutoffMs;
+            const byCap = !keepSet.has(file.filePath);
+            if (!byAge && !byCap) {
+              continue;
+            }
+            if (skipActiveCommands) {
+              try {
+                const parsed = safeJsonParse(fs.readFileSync(file.filePath, "utf8"));
+                if (parsed?.status === "pending" || parsed?.status === "running") {
+                  continue;
+                }
+              } catch {
+                // allow cleanup if invalid
+              }
+            }
+            candidates.push({
+              path: file.filePath,
+              reason: byAge && byCap ? "age+cap" : (byAge ? "age" : "cap"),
+              mtime: file.mtime
+            });
+          }
+
+          return {
+            dirPath,
+            scanned: files.length,
+            candidates
+          };
+        };
+
+        const commandPlan = collectCandidates(commandDir, true);
+        const resultPlan = collectCandidates(resultDir, false);
+
+        const deleteCandidates = (plan: { candidates: Array<{ path: string }> }) => {
+          let deleted = 0;
+          if (dryRun) {
+            return deleted;
+          }
+          for (const candidate of plan.candidates) {
+            try {
+              fs.unlinkSync(candidate.path);
+              deleted += 1;
+            } catch {
+              // ignore failed delete and continue
+            }
+          }
+          return deleted;
+        };
+
+        const deletedCommands = deleteCandidates(commandPlan);
+        const deletedResults = deleteCandidates(resultPlan);
+
+        return formatToolPayload({
+          status: "success",
+          dryRun,
+          policy: {
+            maxAgeHours,
+            maxFilesPerDir
+          },
+          commands: {
+            path: commandPlan.dirPath,
+            scanned: commandPlan.scanned,
+            candidateCount: commandPlan.candidates.length,
+            deletedCount: deletedCommands,
+            candidates: commandPlan.candidates.slice(0, 100)
+          },
+          results: {
+            path: resultPlan.dirPath,
+            scanned: resultPlan.scanned,
+            candidateCount: resultPlan.candidates.length,
+            deletedCount: deletedResults,
+            candidates: resultPlan.candidates.slice(0, 100)
+          }
+        });
+      } catch (error) {
+        return formatToolPayload({
+          status: "error",
+          message: `Failed to cleanup bridge journal: ${String(error)}`
+        }, true);
+      }
     }
   );
 

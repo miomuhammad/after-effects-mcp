@@ -3575,6 +3575,10 @@ installNonBlockingDialogOverrides();
 // Check interval (ms)
 var checkInterval = 2000;
 var isChecking = false;
+var lastPollAt = null;
+var lastCommandSeen = null;
+var lastCommandCompleted = null;
+var lastBridgeError = null;
 
 // Command file path - use Documents folder for reliable access
 function getCommandFilePath() {
@@ -3584,6 +3588,132 @@ function getCommandFilePath() {
 // Result file path - use Documents folder for reliable access
 function getResultFilePath() {
     return getBridgeFolderPath() + "/ae_mcp_result.json";
+}
+
+function getHealthFilePath() {
+    return getBridgeFolderPath() + "/ae_bridge_health.json";
+}
+
+function getCommandsFolderPath() {
+    var folder = new Folder(getBridgeFolderPath() + "/commands");
+    if (!folder.exists) {
+        folder.create();
+    }
+    return folder.fsName;
+}
+
+function getResultsFolderPath() {
+    var folder = new Folder(getBridgeFolderPath() + "/results");
+    if (!folder.exists) {
+        folder.create();
+    }
+    return folder.fsName;
+}
+
+function getJournalCommandFilePath(commandId) {
+    return getCommandsFolderPath() + "/" + String(commandId) + ".json";
+}
+
+function getJournalResultFilePath(commandId) {
+    return getResultsFolderPath() + "/" + String(commandId) + ".json";
+}
+
+function readJsonFile(filePath) {
+    var file = new File(filePath);
+    if (!file.exists) {
+        return null;
+    }
+    if (!file.open("r")) {
+        return null;
+    }
+    var content = file.read();
+    file.close();
+    if (!content) {
+        return null;
+    }
+    try {
+        return JSON.parse(content);
+    } catch (e) {
+        return null;
+    }
+}
+
+function writeTextFile(filePath, text) {
+    var file = new File(filePath);
+    file.encoding = "UTF-8";
+    if (!file.open("w")) {
+        throw new Error("Failed to open file for writing: " + filePath);
+    }
+    file.write(text);
+    file.close();
+}
+
+function writeResultPayload(resultString, commandData) {
+    writeTextFile(getResultFilePath(), resultString);
+    if (commandData && commandData.commandId) {
+        writeTextFile(getJournalResultFilePath(commandData.commandId), resultString);
+    }
+}
+
+function listPendingJournalCommands() {
+    var folder = new Folder(getCommandsFolderPath());
+    if (!folder.exists) {
+        return [];
+    }
+    var files = folder.getFiles("*.json");
+    if (!files || !files.length) {
+        return [];
+    }
+    var pending = [];
+    for (var i = 0; i < files.length; i++) {
+        if (!(files[i] instanceof File)) {
+            continue;
+        }
+        var parsed = readJsonFile(files[i].fsName);
+        if (!parsed) {
+            continue;
+        }
+        if (parsed.status !== "pending") {
+            continue;
+        }
+        pending.push({
+            file: files[i],
+            data: parsed,
+            timestamp: parsed.timestamp || ""
+        });
+    }
+    pending.sort(function(a, b) {
+        if (a.timestamp === b.timestamp) {
+            return a.file.name < b.file.name ? -1 : (a.file.name > b.file.name ? 1 : 0);
+        }
+        return a.timestamp < b.timestamp ? -1 : 1;
+    });
+    return pending;
+}
+
+function writeBridgeHealth(status, extra) {
+    try {
+        var payload = {
+            status: status || "ready",
+            panelRunning: true,
+            autoRunEnabled: autoRunCheckbox ? autoRunCheckbox.value === true : true,
+            isChecking: isChecking === true,
+            lastPollAt: lastPollAt || getIsoTimestamp(),
+            lastCommandSeen: lastCommandSeen,
+            lastCommandCompleted: lastCommandCompleted,
+            lastError: lastBridgeError
+        };
+        if (extra) {
+            payload.meta = extra;
+        }
+
+        var healthFile = new File(getHealthFilePath());
+        healthFile.encoding = "UTF-8";
+        if (healthFile.open("w")) {
+            healthFile.write(JSON.stringify(payload, null, 2));
+            healthFile.close();
+        }
+    } catch (e) {}
 }
 
 function getProjectItems(args) {
@@ -5004,37 +5134,27 @@ function executeCommand(command, args, commandData) {
         var resultString = normalizeCommandResult(command, args, commandData, result);
         logToPanel("Normalized result JSON for tracking freshness and command identity.");
         
-        var resultFile = new File(getResultFilePath());
-        resultFile.encoding = "UTF-8"; // Ensure UTF-8 encoding
-        logToPanel("Opening result file for writing...");
-        var opened = resultFile.open("w");
-        if (!opened) {
-            logToPanel("ERROR: Failed to open result file for writing: " + resultFile.fsName);
-            throw new Error("Failed to open result file for writing.");
-        }
-        logToPanel("Writing to result file...");
-        var written = resultFile.write(resultString);
-        if (!written) {
-             logToPanel("ERROR: Failed to write to result file (write returned false): " + resultFile.fsName);
-             // Still try to close, but log the error
-        }
-        logToPanel("Closing result file...");
-        var closed = resultFile.close();
-         if (!closed) {
-             logToPanel("ERROR: Failed to close result file: " + resultFile.fsName);
-             // Continue, but log the error
-        }
+        logToPanel("Writing result payload to legacy and journal result paths...");
+        writeResultPayload(resultString, commandData);
         logToPanel("Result file write process complete.");
         appendBridgeLogEntry("result", "success", "Bridge command completed successfully.", {
             command: command
         });
+        lastCommandCompleted = {
+            command: command,
+            commandId: commandData && commandData.commandId ? commandData.commandId : (args && args.commandId ? args.commandId : null),
+            completedAt: getIsoTimestamp(),
+            status: "success"
+        };
+        lastBridgeError = null;
+        writeBridgeHealth("ready", { lastCommandStatus: "success", command: command });
         
         logToPanel("Command completed successfully: " + command); // Changed log message
         setStatusText("Command completed: " + command);
         
         // Update command file status
         logToPanel("Updating command status to completed...");
-        updateCommandStatus("completed");
+        updateCommandStatus("completed", commandData);
         logToPanel("Command status updated.");
         
     } catch (error) {
@@ -5044,6 +5164,19 @@ function executeCommand(command, args, commandData) {
             line: error.line,
             fileName: error.fileName
         });
+        lastCommandCompleted = {
+            command: command,
+            commandId: commandData && commandData.commandId ? commandData.commandId : (args && args.commandId ? args.commandId : null),
+            completedAt: getIsoTimestamp(),
+            status: "error"
+        };
+        lastBridgeError = {
+            message: error.toString(),
+            line: error.line || null,
+            fileName: error.fileName || null,
+            timestamp: getIsoTimestamp()
+        };
+        writeBridgeHealth("error", { command: command, error: error.toString() });
         setStatusText("Error: " + error.toString());
         
         // Write detailed error to result file
@@ -5055,22 +5188,15 @@ function executeCommand(command, args, commandData) {
                 line: error.line,
                 fileName: error.fileName
             });
-            var errorFile = new File(getResultFilePath());
-            errorFile.encoding = "UTF-8";
-            if (errorFile.open("w")) {
-                errorFile.write(errorResult);
-                errorFile.close();
-                logToPanel("Successfully wrote ERROR to result file.");
-            } else {
-                 logToPanel("CRITICAL ERROR: Failed to open result file to write error!");
-            }
+            writeResultPayload(errorResult, commandData);
+            logToPanel("Successfully wrote ERROR to result file.");
         } catch (writeError) {
              logToPanel("CRITICAL ERROR: Failed to write error to result file: " + writeError.toString());
         }
         
         // Update command file status even after error
         logToPanel("Updating command status to error...");
-        updateCommandStatus("error");
+        updateCommandStatus("error", commandData);
         logToPanel("Command status updated to error.");
     } finally {
         currentCommandContext.command = null;
@@ -5079,34 +5205,40 @@ function executeCommand(command, args, commandData) {
 }
 
 // Update command file status
-function updateCommandStatus(status) {
+function updateCommandStatus(status, commandData) {
     try {
-        var commandFilePath = getCommandFilePath();
-        var commandFile = new File(commandFilePath);
-        if (commandFile.exists) {
-            if (!commandFile.open("r")) {
-                return false;
-            }
-            var content = commandFile.read();
-            commandFile.close();
-            
-            if (content) {
-                var commandData = JSON.parse(content);
-                if (commandData.status === status) {
-                    return false;
-                }
-                commandData.status = status;
-                
-                var writeFile = new File(commandFilePath);
-                writeFile.encoding = "UTF-8";
-                if (!writeFile.open("w")) {
-                    throw new Error("Failed to open command file for writing.");
-                }
-                writeFile.write(JSON.stringify(commandData, null, 2));
-                writeFile.close();
-                return true;
-            }
+        var updated = false;
+        var paths = [];
+        var primaryPath = commandData && commandData.commandId ? getJournalCommandFilePath(commandData.commandId) : null;
+        if (primaryPath) {
+            paths.push(primaryPath);
         }
+        paths.push(getCommandFilePath());
+
+        for (var i = 0; i < paths.length; i++) {
+            var commandFilePath = paths[i];
+            if (!commandFilePath) {
+                continue;
+            }
+            var commandFile = new File(commandFilePath);
+            if (!commandFile.exists) {
+                continue;
+            }
+            var parsed = readJsonFile(commandFilePath);
+            if (!parsed) {
+                continue;
+            }
+            if (commandData && commandData.commandId && parsed.commandId && parsed.commandId !== commandData.commandId) {
+                continue;
+            }
+            if (parsed.status === status) {
+                continue;
+            }
+            parsed.status = status;
+            writeTextFile(commandFilePath, JSON.stringify(parsed, null, 2));
+            updated = true;
+        }
+        return updated;
     } catch (e) {
         logToPanel("Error updating command status: " + e.toString());
     }
@@ -5137,37 +5269,55 @@ function refreshPanelUI() {
 
 // Check for new commands
 function checkForCommands() {
-    if (!autoRunCheckbox.value || isChecking) return;
+    lastPollAt = getIsoTimestamp();
+    if (!autoRunCheckbox.value) {
+        writeBridgeHealth("idle", { reason: "autorun-disabled" });
+        return;
+    }
+    if (isChecking) {
+        writeBridgeHealth("busy", { reason: "check-already-running" });
+        return;
+    }
     
     isChecking = true;
+    writeBridgeHealth("polling", null);
     
     try {
-        var commandFile = new File(getCommandFilePath());
-        if (commandFile.exists) {
-            commandFile.open("r");
-            var content = commandFile.read();
-            commandFile.close();
-            
-            if (content) {
-                var commandData = (typeof JSON !== "undefined" && JSON.parse)
-                    ? JSON.parse(content)
-                    : eval("(" + content + ")");
-                
-                // Only execute pending commands
-                if (commandData.status === "pending") {
-                    // Update status to running
-                    updateCommandStatus("running");
-                    
-                    // Execute the command
-                    executeCommand(commandData.command, commandData.args || {}, commandData);
-                }
+        var commandData = null;
+        var pendingJournal = listPendingJournalCommands();
+        if (pendingJournal.length > 0) {
+            commandData = pendingJournal[0].data;
+        } else {
+            var commandFile = new File(getCommandFilePath());
+            if (commandFile.exists) {
+                commandData = readJsonFile(getCommandFilePath());
             }
         }
+
+        if (commandData && commandData.status === "pending") {
+            lastCommandSeen = {
+                command: commandData.command || null,
+                commandId: commandData.commandId || (commandData.args && commandData.args.commandId ? commandData.args.commandId : null),
+                seenAt: getIsoTimestamp()
+            };
+            writeBridgeHealth("executing", { command: commandData.command || null });
+            // Update status to running
+            updateCommandStatus("running", commandData);
+            
+            // Execute the command
+            executeCommand(commandData.command, commandData.args || {}, commandData);
+        }
     } catch (e) {
+        lastBridgeError = {
+            message: e.toString(),
+            timestamp: getIsoTimestamp()
+        };
+        writeBridgeHealth("error", { error: e.toString() });
         logToPanel("Error checking for commands: " + e.toString());
     }
     
     isChecking = false;
+    writeBridgeHealth("ready", null);
 }
 
 // Set up timer to check for commands
@@ -5181,6 +5331,8 @@ logToPanel("After Effects version: " + app.version);
 logToPanel("UI mode: " + ((panel instanceof Panel) ? "dockable panel" : "floating palette"));
 logToPanel("Command file: " + getCommandFilePath());
 setStatusText("Ready - Auto-run is " + (autoRunCheckbox.value ? "ON" : "OFF"));
+lastPollAt = getIsoTimestamp();
+writeBridgeHealth("ready", { startup: true });
 
 // Start the command checker
 startCommandChecker();

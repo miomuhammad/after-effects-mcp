@@ -39,14 +39,15 @@ export type ExecuteCommandThroughSafetyBound = (
 export type QueueMutationWithSafety = (
   command: string,
   args: Record<string, any> | undefined,
-  options: { allowForceWithoutCheckpoint?: boolean } | undefined,
-  dependencies: Pick<SafetyRoutingDependencies, "queueBridgeCommand" | "executeBridgeCommandAndWait">
+  options: { allowForceWithoutCheckpoint?: boolean; deferQueue?: boolean } | undefined,
+  dependencies: Pick<SafetyRoutingDependencies, "queueBridgeCommand" | "executeBridgeCommandAndWait" | "withBridgeRoundTripLock">
 ) => Promise<Record<string, unknown>>;
 
 export type SafetyRoutingDependencies = {
   queueBridgeCommand: QueueBridgeCommand;
   waitForBridgeResult: WaitForBridgeResult;
   executeBridgeCommandAndWait: ExecuteBridgeCommandAndWait;
+  withBridgeRoundTripLock: <T>(work: () => Promise<T>) => Promise<T>;
 };
 
 export type BuildQueuedBridgeToolResponse = (command: string, commandId: string, detail?: string) => any;

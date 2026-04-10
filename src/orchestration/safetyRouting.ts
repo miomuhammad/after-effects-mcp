@@ -115,10 +115,11 @@ export async function createProjectCheckpoint(
 export async function queueMutationWithSafety(
   command: string,
   args: Record<string, any> = {},
-  options: { allowForceWithoutCheckpoint?: boolean } = {},
+  options: { allowForceWithoutCheckpoint?: boolean; deferQueue?: boolean } = {},
   dependencies: {
     queueBridgeCommand: (command: string, args?: Record<string, any>) => Promise<string>;
     executeBridgeCommandAndWait: (command: string, args: Record<string, any>, options?: { timeoutMs?: number; maxAttempts?: number }) => Promise<{ ok: boolean; result: any; retries: number; failureClass?: string }>;
+    withBridgeRoundTripLock: <T>(work: () => Promise<T>) => Promise<T>;
   }
 ) {
   const risk = classifyMutationRisk(command);
@@ -177,6 +178,10 @@ export async function queueMutationWithSafety(
     }
   }
 
+  if (options.deferQueue === true) {
+    return response;
+  }
+
   const commandId = await dependencies.queueBridgeCommand(command, sanitizedArgs);
   response.commandId = commandId;
   response.message = describeQueuedCommand(command, commandId);
@@ -191,6 +196,7 @@ export async function executeCommandThroughSafety(
     queueBridgeCommand: (command: string, args?: Record<string, any>) => Promise<string>;
     waitForBridgeResult: (options?: { expectedCommand?: string; expectedCommandId?: string; timeoutMs?: number; pollMs?: number }) => Promise<string>;
     executeBridgeCommandAndWait: (command: string, args: Record<string, any>, options?: { timeoutMs?: number; maxAttempts?: number }) => Promise<{ ok: boolean; result: any; retries: number; failureClass?: string }>;
+    withBridgeRoundTripLock: <T>(work: () => Promise<T>) => Promise<T>;
   }
 ): Promise<{ ok: boolean; result: any; retries: number; failureClass?: string }> {
   const risk = classifyMutationRisk(command);
@@ -204,47 +210,51 @@ export async function executeCommandThroughSafety(
 
   try {
     const queued = await queueMutationWithSafety(command, args, {
-      allowForceWithoutCheckpoint: options.allowForceWithoutCheckpoint
+      allowForceWithoutCheckpoint: options.allowForceWithoutCheckpoint,
+      deferQueue: true
     }, {
       queueBridgeCommand: dependencies.queueBridgeCommand,
-      executeBridgeCommandAndWait: dependencies.executeBridgeCommandAndWait
+      executeBridgeCommandAndWait: dependencies.executeBridgeCommandAndWait,
+      withBridgeRoundTripLock: dependencies.withBridgeRoundTripLock
     });
-    const commandId = String(queued?.commandId || "");
-    if (!commandId) {
-      return {
-        ok: true,
-        result: queued,
-        retries: 0
+
+    return await dependencies.withBridgeRoundTripLock(async () => {
+      const sanitizedArgs = sanitizeMutationArgs(args);
+      const commandId = await dependencies.queueBridgeCommand(command, sanitizedArgs);
+      const queuedWithCommand = {
+        ...queued,
+        commandId,
+        message: describeQueuedCommand(command, commandId)
       };
-    }
 
-    const raw = await dependencies.waitForBridgeResult({
-      expectedCommand: command,
-      expectedCommandId: commandId,
-      timeoutMs: options.timeoutMs ?? 12000,
-      pollMs: 250
-    });
-    const parsed = safeJsonParse(raw) ?? { status: "error", message: raw };
-    const combined = {
-      ...queued,
-      bridgeResult: parsed
-    };
+      const raw = await dependencies.waitForBridgeResult({
+        expectedCommand: command,
+        expectedCommandId: commandId,
+        timeoutMs: options.timeoutMs ?? 12000,
+        pollMs: 250
+      });
+      const parsed = safeJsonParse(raw) ?? { status: "error", message: raw };
+      const combined = {
+        ...queuedWithCommand,
+        bridgeResult: parsed
+      };
 
-    if (parsed?.status === "success") {
+      if (parsed?.status === "success") {
+        return {
+          ok: true,
+          result: combined,
+          retries: 0
+        };
+      }
+
+      const classified = classifyBridgeFailure(parsed);
       return {
-        ok: true,
+        ok: false,
         result: combined,
-        retries: 0
+        retries: 0,
+        failureClass: classified.failureClass
       };
-    }
-
-    const classified = classifyBridgeFailure(parsed);
-    return {
-      ok: false,
-      result: combined,
-      retries: 0,
-      failureClass: classified.failureClass
-    };
+    });
   } catch (error) {
     return {
       ok: false,

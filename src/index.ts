@@ -22,7 +22,14 @@ import {
   inspectMutationPreflight,
   queueMutationWithSafety
 } from "./orchestration/safetyRouting.js";
-import { getOperationLogPath } from "./bridge/paths.js";
+import {
+  getAECommandFilePath,
+  getAECommandQueueDirPath,
+  getAEHealthFilePath,
+  getAEResultFilePath,
+  getAEResultQueueDirPath,
+  getOperationLogPath
+} from "./bridge/paths.js";
 import { appendOperationLog } from "./observability/operationLog.js";
 import {
   buildQueuedBridgeToolResponse,
@@ -71,7 +78,8 @@ const TEMP_DIR = path.join(__dirname, "temp");
 const safetyRoutingDependencies: SafetyRoutingDependencies = {
   queueBridgeCommand,
   waitForBridgeResult,
-  executeBridgeCommandAndWait
+  executeBridgeCommandAndWait,
+  withBridgeRoundTripLock
 };
 const executeCommandThroughSafetyBound = (
   command: string,
@@ -150,6 +158,11 @@ registerBridgeTools({
   server,
   fs,
   getOperationLogPath,
+  getAECommandFilePath,
+  getAEResultFilePath,
+  getAEHealthFilePath,
+  getAECommandQueueDirPath,
+  getAEResultQueueDirPath,
   withBridgeRoundTripLock,
   queueBridgeCommand,
   waitForBridgeResult,

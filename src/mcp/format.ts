@@ -14,6 +14,14 @@ export function safeJsonParse<T = any>(value: string): T | null {
 }
 
 export function classifyBridgeFailure(result: any): { transient: boolean; failureClass: string } {
+  if (typeof result?.failureClass === "string" && result.failureClass.trim()) {
+    const explicitFailureClass = result.failureClass.trim();
+    const transient =
+      explicitFailureClass === "bridge-timeout" ||
+      explicitFailureClass === "stale-result" ||
+      explicitFailureClass === "host-stalled";
+    return { transient, failureClass: explicitFailureClass };
+  }
   const message = String(result?.message || result?.error || "");
   if (message.includes("Timed out waiting for bridge result")) {
     return { transient: true, failureClass: "bridge-timeout" };

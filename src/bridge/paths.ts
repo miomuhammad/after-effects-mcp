@@ -10,6 +10,9 @@ let cachedAELogsDir: string | undefined;
 let cachedOperationLogPath: string | undefined;
 let cachedCommandFilePath: string | undefined;
 let cachedResultFilePath: string | undefined;
+let cachedHealthFilePath: string | undefined;
+let cachedCommandQueueDirPath: string | undefined;
+let cachedResultQueueDirPath: string | undefined;
 
 function resolveWindowsDocumentsDir(): string | null {
   if (cachedWindowsDocumentsDir !== undefined) {
@@ -100,4 +103,39 @@ export function getAEResultFilePath(): string {
     cachedResultFilePath = path.join(getAETempDir(), "ae_mcp_result.json");
   }
   return cachedResultFilePath;
+}
+
+export function getAEHealthFilePath(): string {
+  if (!cachedHealthFilePath) {
+    cachedHealthFilePath = path.join(getAETempDir(), "ae_bridge_health.json");
+  }
+  return cachedHealthFilePath;
+}
+
+export function getAECommandQueueDirPath(): string {
+  if (!cachedCommandQueueDirPath) {
+    cachedCommandQueueDirPath = path.join(getAETempDir(), "commands");
+    fs.mkdirSync(cachedCommandQueueDirPath, { recursive: true });
+  }
+  return cachedCommandQueueDirPath;
+}
+
+export function getAEResultQueueDirPath(): string {
+  if (!cachedResultQueueDirPath) {
+    cachedResultQueueDirPath = path.join(getAETempDir(), "results");
+    fs.mkdirSync(cachedResultQueueDirPath, { recursive: true });
+  }
+  return cachedResultQueueDirPath;
+}
+
+function sanitizeBridgeFileToken(value: string): string {
+  return String(value || "").replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+export function getAECommandQueueFilePath(commandId: string): string {
+  return path.join(getAECommandQueueDirPath(), `${sanitizeBridgeFileToken(commandId)}.json`);
+}
+
+export function getAEResultQueueFilePath(commandId: string): string {
+  return path.join(getAEResultQueueDirPath(), `${sanitizeBridgeFileToken(commandId)}.json`);
 }
