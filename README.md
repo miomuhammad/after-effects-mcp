@@ -25,6 +25,7 @@ For this repo, treat `AGENTS.md` as the primary session-start guide for AI agent
 ## Agent Guide
 
 - Repo agent entrypoint: [AGENTS.md](AGENTS.md)
+- Bridge command schema + terminal helper docs: [docs/ae-mcp/BRIDGE_COMMAND_SCHEMA.md](docs/ae-mcp/BRIDGE_COMMAND_SCHEMA.md)
 
 ## Table of Contents
 - [Features](#features)
@@ -250,6 +251,20 @@ yarn build
 ```
 
 **Note:** This project uses esbuild for fast builds, replacing the previous TypeScript compiler approach that could run out of memory on larger codebases.
+
+### 🔧 Bridge CLI Helpers (Terminal)
+
+Quick queue + wait:
+
+```bash
+npm run bridge:send -- --command getProjectInfo --wait
+```
+
+Wait for an existing command id:
+
+```bash
+npm run bridge:wait -- --command-id <commandId> --command getProjectInfo
+```
 
 ### 🤝 Contributing
 
