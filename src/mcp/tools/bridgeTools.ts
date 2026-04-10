@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { appendWrapperMakerRuntimeUsage } from "../../observability/wrapperMakerTracker.js";
 import type {
   BuildQueuedBridgeToolResponse,
   ExecuteCommandThroughSafetyBound,
@@ -393,6 +394,42 @@ export function registerBridgeTools(deps: {
       parameters?: Record<string, unknown>;
       executionMode?: "execute_and_wait" | "queue_only";
     }) => {
+      const startedAt = Date.now();
+      const trackRuntimeUsage = (args: {
+        status: "success" | "error" | "queued";
+        commandId?: string | null;
+        failureClass?: string | null;
+        notes?: string | null;
+        metadata?: Record<string, unknown> | null;
+      }) => {
+        const tracked = appendWrapperMakerRuntimeUsage({
+          script,
+          executionMode,
+          status: args.status,
+          commandId: args.commandId || null,
+          failureClass: args.failureClass || null,
+          notes: args.notes || null,
+          durationMs: Date.now() - startedAt,
+          metadata: args.metadata || null
+        });
+        appendOperationLog({
+          timestamp: new Date().toISOString(),
+          phase: "wrapper-maker-runtime-hook",
+          status: tracked.ok ? "success" : "error",
+          command: "run-script",
+          commandId: args.commandId || null,
+          failureClass: args.failureClass || null,
+          detail: "Auto-recorded run-script usage for wrapper-maker candidates.",
+          meta: {
+            script,
+            executionMode,
+            hookStatus: args.status,
+            usageLogPath: tracked.logPath || null,
+            hookError: tracked.error || null
+          }
+        });
+      };
+
       const allowedScripts = [
         "getProjectItems",
         "findProjectItem",
@@ -459,10 +496,21 @@ export function registerBridgeTools(deps: {
         if (executionMode === "queue_only") {
           if (safety.isMutation) {
             const payload = await queueMutationWithSafety(script, sanitizedParameters, { allowForceWithoutCheckpoint: true }, safetyRoutingDependencies);
+            trackRuntimeUsage({
+              status: payload?.status === "error" ? "error" : "queued",
+              commandId: payload?.commandId || null,
+              failureClass: payload?.failureClass || null,
+              metadata: { via: "queueMutationWithSafety" }
+            });
             return formatToolPayload(payload);
           }
 
           const commandId = await queueBridgeCommand(script, sanitizedParameters);
+          trackRuntimeUsage({
+            status: "queued",
+            commandId,
+            metadata: { via: "queueBridgeCommand" }
+          });
           return formatToolPayload({
             status: "queued",
             command: script,
@@ -478,6 +526,11 @@ export function registerBridgeTools(deps: {
           });
 
           if (executed.ok) {
+            trackRuntimeUsage({
+              status: "success",
+              commandId: executed?.result?._commandId || executed?.result?.commandId || null,
+              failureClass: executed.failureClass || null
+            });
             return formatToolPayload({
               status: "success",
               command: script,
@@ -487,6 +540,11 @@ export function registerBridgeTools(deps: {
             });
           }
 
+          trackRuntimeUsage({
+            status: "error",
+            commandId: executed?.result?._commandId || executed?.result?.commandId || null,
+            failureClass: executed.failureClass || null
+          });
           return formatToolPayload({
             status: "error",
             command: script,
@@ -501,6 +559,11 @@ export function registerBridgeTools(deps: {
           maxAttempts: 2
         });
         if (executed.ok) {
+          trackRuntimeUsage({
+            status: "success",
+            commandId: executed?.result?._commandId || executed?.result?.commandId || null,
+            failureClass: executed.failureClass || null
+          });
           return formatToolPayload({
             status: "success",
             command: script,
@@ -510,6 +573,11 @@ export function registerBridgeTools(deps: {
           });
         }
 
+        trackRuntimeUsage({
+          status: "error",
+          commandId: executed?.result?._commandId || executed?.result?.commandId || null,
+          failureClass: executed.failureClass || null
+        });
         return formatToolPayload({
           status: "error",
           command: script,
@@ -518,6 +586,11 @@ export function registerBridgeTools(deps: {
           result: executed.result
         }, true);
       } catch (error) {
+        trackRuntimeUsage({
+          status: "error",
+          notes: "run-script-exception",
+          metadata: { message: String(error) }
+        });
         return formatToolPayload(
           buildStructuredSafetyError(error, "RUN_SCRIPT_FAILED", "Failed to queue the requested script."),
           true

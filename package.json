@@ -13,6 +13,7 @@
     "smoke:bridge": "node tools/bridge-reliability-smoke.mjs",
     "bridge:send": "node tools/send-bridge-command.mjs",
     "bridge:wait": "node tools/wait-bridge-result.mjs",
+    "wrapper:maker": "node tools/wrapper-maker/index.mjs",
     "release-readiness": "node tools/release-readiness.mjs",
     "postinstall": "npm run build"
   },

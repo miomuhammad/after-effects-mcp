@@ -266,6 +266,22 @@ Wait for an existing command id:
 npm run bridge:wait -- --command-id <commandId> --command getProjectInfo
 ```
 
+### 🧰 Wrapper Maker (Local)
+
+Track ad-hoc workflows and generate wrapper scaffolds:
+
+```bash
+npm run wrapper:maker -- record --name bounce-drop --intent "Ball drop with bounce" --status success
+npm run wrapper:maker -- candidates --lookback-days 14 --min-uses 5 --min-success-rate 0.8
+npm run wrapper:maker -- scaffold --from-candidate bounce-drop
+```
+
+Reference:
+- [`tools/wrapper-maker/README.md`](tools/wrapper-maker/README.md)
+
+Note:
+- `run-script` runtime calls are auto-logged to `.local/wrapper-maker/adhoc-usage.jsonl` for candidate mining.
+
 ### 🤝 Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
