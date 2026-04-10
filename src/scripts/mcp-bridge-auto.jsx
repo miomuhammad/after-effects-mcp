@@ -1079,6 +1079,29 @@ function ensureDropdownControl(layer, name, items, selectedIndex) {
     return fx;
 }
 
+function normalizeExpressionString(expressionString) {
+    if (expressionString === null || expressionString === undefined) {
+        return "";
+    }
+    var normalized = String(expressionString);
+    // Convert escaped newline tokens into real line breaks for AE expression parser.
+    normalized = normalized.replace(/\\r\\n/g, "\r\n");
+    normalized = normalized.replace(/\\n/g, "\n");
+    normalized = normalized.replace(/\\r/g, "\r");
+    return normalized;
+}
+
+function setExpressionAndValidate(property, expressionString) {
+    property.expression = expressionString;
+    if (expressionString === "") {
+        return { ok: true, error: "" };
+    }
+    if (property.expressionEnabled === false && property.expressionError) {
+        return { ok: false, error: property.expressionError };
+    }
+    return { ok: true, error: "" };
+}
+
 function parseHexColor(text) {
     var hex = String(text || "").replace(/^\s+|\s+$/g, "").replace(/^#/, "").toUpperCase();
     if (hex.length === 3) {
@@ -2037,13 +2060,22 @@ function setLayerExpression(args) {
         var comp = resolveComposition(args);
         var layer = resolveSingleLayerInComp(comp, args);
         var propertyName = args.propertyName;
-        var expressionString = args.expressionString;
+        var expressionString = normalizeExpressionString(args.expressionString);
         var property = resolvePropertyOnLayer(layer, propertyName);
         if (!property.canSetExpression) {
             return JSON.stringify({ status: "error", message: "Property '" + propertyName + "' does not support expressions." }, null, 2);
         }
 
-        property.expression = expressionString;
+        var expressionValidation = setExpressionAndValidate(property, expressionString);
+        if (!expressionValidation.ok) {
+            return JSON.stringify({
+                status: "error",
+                message: "Expression compile error on '" + propertyName + "' for layer '" + layer.name + "': " + expressionValidation.error,
+                composition: buildCompSummary(comp),
+                layer: buildLayerSummary(layer),
+                propertyName: propertyName
+            }, null, 2);
+        }
 
         var action = expressionString === "" ? "removed" : "set";
         return JSON.stringify({
@@ -2052,6 +2084,8 @@ function setLayerExpression(args) {
             composition: buildCompSummary(comp),
             layer: buildLayerSummary(layer),
             propertyName: propertyName,
+            expressionEnabled: property.expressionEnabled,
+            expressionError: property.expressionError || "",
             changed: ["expression"]
         }, null, 2);
     } catch (e) {
@@ -2931,10 +2965,10 @@ function linkOpacityToDropdown(args) {
             throw new Error("Dropdown control not found on controller layer: " + dropdownName);
         }
 
-        var compNameEsc = comp.name.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
         var controllerNameEsc = controllerName.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
         var dropdownNameEsc = dropdownName.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
         var linked = [];
+        var expressionErrors = [];
 
         for (var i = 0; i < targetLayers.length; i++) {
             var layer = targetLayers[i];
@@ -2942,20 +2976,42 @@ function linkOpacityToDropdown(args) {
             var expr;
             if (mappingMode === "threshold") {
                 expr =
-'var ctrl = comp("' + compNameEsc + '").layer("' + controllerNameEsc + '").effect("' + dropdownNameEsc + '")("Menu");\n' +
-'ctrl >= ' + checkValue + ' ? 100 : 0;';
+'var ctrl = thisComp.layer("' + controllerNameEsc + '").effect("' + dropdownNameEsc + '")("Menu").value; ctrl >= ' + checkValue + ' ? 100 : 0;';
             } else {
                 expr =
-'var ctrl = comp("' + compNameEsc + '").layer("' + controllerNameEsc + '").effect("' + dropdownNameEsc + '")("Menu");\n' +
-'ctrl == ' + checkValue + ' ? 100 : 0;';
+'var ctrl = thisComp.layer("' + controllerNameEsc + '").effect("' + dropdownNameEsc + '")("Menu").value; ctrl == ' + checkValue + ' ? 100 : 0;';
             }
 
             var opacityProp = layer.property("ADBE Transform Group").property("ADBE Opacity");
-            opacityProp.expression = expr;
+            var expressionValidation = setExpressionAndValidate(opacityProp, expr);
+            if (!expressionValidation.ok) {
+                expressionErrors.push({
+                    layer: buildLayerSummary(layer),
+                    menuValue: checkValue,
+                    error: expressionValidation.error
+                });
+            }
             linked.push({
                 layer: buildLayerSummary(layer),
                 menuValue: checkValue
             });
+        }
+
+        if (expressionErrors.length) {
+            return JSON.stringify({
+                status: "error",
+                message: "Opacity linking failed because one or more expressions did not compile.",
+                composition: buildCompSummary(comp),
+                controller: {
+                    name: controllerLayer.name,
+                    index: controllerLayer.index,
+                    dropdownName: dropdownName
+                },
+                changed: ["expression"],
+                mappingMode: mappingMode,
+                linkedLayers: linked,
+                expressionErrors: expressionErrors
+            }, null, 2);
         }
 
         return JSON.stringify({
