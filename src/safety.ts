@@ -65,6 +65,7 @@ const RISK_DEFINITIONS: Record<string, Omit<MutationSafetyDefinition, "command">
   cleanupKeyframes: { isMutation: true, riskClass: "medium", reason: "Removes keyframes and should inspect selected properties before applying changes." },
   setupRetimingMode: { isMutation: true, riskClass: "medium", reason: "Adds dropdown and expression rigging and should verify selected properties first." },
   linkOpacityToDropdown: { isMutation: true, riskClass: "medium", reason: "Writes opacity expressions across layers and should verify targets first." },
+  runOperationBatch: { isMutation: true, riskClass: "high", reason: "Executes multiple ordered mutations in one undo group and may include destructive layer operations." },
   setLayerProperties: { isMutation: true, riskClass: "high", reason: "Directly rewrites transform, timing, text, or blend properties on an existing layer." },
   batchSetLayerProperties: { isMutation: true, riskClass: "high", reason: "Directly rewrites properties across multiple layers in one operation." },
   setCompositionProperties: { isMutation: true, riskClass: "high", reason: "Rewrites composition-level timing or dimension settings." },

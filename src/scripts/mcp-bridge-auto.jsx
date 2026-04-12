@@ -253,6 +253,79 @@ function buildTransformSummary(layer) {
     };
 }
 
+function buildLayerExpressionSummary(layer) {
+    var expressions = [];
+
+    function pushExpression(prop, label) {
+        if (!prop) {
+            return;
+        }
+        try {
+            var expressionText = prop.expression || "";
+            var expressionEnabled = prop.expressionEnabled === true;
+            if (!expressionEnabled && expressionText === "") {
+                return;
+            }
+            expressions.push({
+                propertyName: label || prop.name || "Property",
+                expressionEnabled: expressionEnabled,
+                expressionError: prop.expressionError || "",
+                expressionLength: expressionText.length
+            });
+        } catch (expressionError) {}
+    }
+
+    try {
+        var transform = layer.property("ADBE Transform Group") || layer.property("Transform");
+        if (transform) {
+            for (var i = 1; i <= transform.numProperties; i++) {
+                pushExpression(transform.property(i), transform.property(i).name);
+            }
+        }
+    } catch (transformError) {}
+
+    try {
+        pushExpression(layer.property("Source Text"), "Source Text");
+    } catch (sourceTextError) {}
+
+    return expressions;
+}
+
+function buildCompactLayerValidationSummary(layer) {
+    if (!layer) {
+        return null;
+    }
+
+    var effects = buildEffectsSummary(layer);
+    var masks = buildMasksSummary(layer);
+    var expressions = buildLayerExpressionSummary(layer);
+
+    return {
+        index: layer.index,
+        name: layer.name,
+        type: getLayerType(layer),
+        parent: layer.parent ? buildLayerSummary(layer.parent) : null,
+        timing: {
+            inPoint: layer.inPoint,
+            outPoint: layer.outPoint,
+            startTime: layer.startTime,
+            stretch: layer.stretch
+        },
+        switches: {
+            enabled: layer.enabled,
+            locked: layer.locked,
+            motionBlur: layer.motionBlur,
+            shy: layer.shy,
+            solo: layer.solo,
+            threeDLayer: layer.threeDLayer === true
+        },
+        transform: buildTransformSummary(layer),
+        effectCount: effects.length,
+        maskCount: masks.length,
+        expressions: expressions
+    };
+}
+
 function buildLayerDetails(layer) {
     if (!layer) {
         return null;
@@ -278,6 +351,7 @@ function buildLayerDetails(layer) {
         stretch: layer.stretch,
         parent: layer.parent ? buildLayerSummary(layer.parent) : null,
         transform: buildTransformSummary(layer),
+        expressions: buildLayerExpressionSummary(layer),
         masks: buildMasksSummary(layer),
         effects: buildEffectsSummary(layer)
     };
@@ -376,6 +450,28 @@ function findLayersByName(comp, layerName) {
         }
     }
     return matches;
+}
+
+function resolveLayerReferenceInComp(comp, layerRef) {
+    if (!comp || !layerRef) {
+        return null;
+    }
+
+    if (hasValue(layerRef.index)) {
+        var layerIndex = parseInt(layerRef.index, 10);
+        if (!isNaN(layerIndex) && layerIndex >= 1 && layerIndex <= comp.numLayers) {
+            return comp.layer(layerIndex);
+        }
+    }
+
+    if (hasValue(layerRef.name)) {
+        var matches = findLayersByName(comp, layerRef.name);
+        if (matches.length === 1) {
+            return matches[0];
+        }
+    }
+
+    return null;
 }
 
 function getSelectedLayersForComp(comp) {
@@ -597,6 +693,155 @@ function inspectPropertyState(property) {
     };
 }
 
+function getSupportedBatchOperationTypes() {
+    return [
+        "createShapeLayer",
+        "createTextLayer",
+        "createSolidLayer",
+        "setLayerProperties",
+        "setLayerKeyframe",
+        "setLayerExpression",
+        "deleteLayer",
+        "duplicateLayer",
+        "clearLayerSelection",
+        "selectLayers",
+        "setCompositionProperties"
+    ];
+}
+
+function isSupportedBatchOperationType(type) {
+    var supported = getSupportedBatchOperationTypes();
+    for (var i = 0; i < supported.length; i++) {
+        if (supported[i] === type) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function buildBatchOperationArgs(batchArgs, operation) {
+    var merged = {};
+    var key;
+    batchArgs = batchArgs || {};
+    operation = operation || {};
+
+    if (hasValue(batchArgs.compName) && !hasValue(operation.compName)) {
+        merged.compName = batchArgs.compName;
+    }
+    if (hasValue(batchArgs.compIndex) && !hasValue(operation.compIndex)) {
+        merged.compIndex = batchArgs.compIndex;
+    }
+    if (batchArgs.targetComp && !operation.targetComp) {
+        merged.targetComp = batchArgs.targetComp;
+    }
+
+    for (key in operation) {
+        if (operation.hasOwnProperty(key) && key !== "type") {
+            merged[key] = operation[key];
+        }
+    }
+
+    return merged;
+}
+
+function parseCommandResultObject(rawResult) {
+    var resultObj = null;
+    if (typeof rawResult === "string") {
+        try {
+            resultObj = JSON.parse(rawResult);
+        } catch (parseError) {
+            resultObj = { status: "success", message: rawResult };
+        }
+    } else if (rawResult && typeof rawResult === "object") {
+        resultObj = rawResult;
+    } else {
+        resultObj = { status: "success", message: String(rawResult) };
+    }
+
+    if (resultObj.success !== undefined && resultObj.status === undefined) {
+        resultObj.status = resultObj.success ? "success" : "error";
+    }
+    if (!resultObj.status) {
+        resultObj.status = "success";
+    }
+    if (!resultObj.message && resultObj.error) {
+        resultObj.message = resultObj.error;
+    }
+
+    return resultObj;
+}
+
+function normalizeOperationResult(command, args, rawResult) {
+    var resultObj = parseCommandResultObject(rawResult);
+    resultObj.target = resultObj.target || buildTargetSummary(args, resultObj);
+    resultObj.changed = inferChangedItems(resultObj);
+    resultObj.created = inferCreatedItems(command, resultObj);
+    resultObj.warnings = resultObj.warnings || [];
+    return resultObj;
+}
+
+function executeBatchOperationByType(type, args) {
+    switch (type) {
+        case "createShapeLayer":
+            return createShapeLayer(args);
+        case "createTextLayer":
+            return createTextLayer(args);
+        case "createSolidLayer":
+            return createSolidLayer(args);
+        case "setLayerProperties":
+            return setLayerProperties(args);
+        case "setLayerKeyframe":
+            return setLayerKeyframe(args);
+        case "setLayerExpression":
+            return setLayerExpression(args);
+        case "deleteLayer":
+            return deleteLayer(args);
+        case "duplicateLayer":
+            return duplicateLayer(args);
+        case "clearLayerSelection":
+            return clearLayerSelection(args);
+        case "selectLayers":
+            return selectLayers(args);
+        case "setCompositionProperties":
+            return setCompositionProperties(args);
+        default:
+            throw new Error("Unsupported batch operation type: " + type);
+    }
+}
+
+function summarizeBatchOperationChanges(type, resultObj) {
+    var summary = [];
+    var i;
+
+    if (resultObj.created && resultObj.created.length) {
+        for (i = 0; i < resultObj.created.length; i++) {
+            var createdEntry = resultObj.created[i];
+            summary.push("Created " + createdEntry.type + " '" + createdEntry.name + "'");
+        }
+    }
+
+    if (resultObj.changed && resultObj.changed.length) {
+        var targetLabel = "";
+        if (resultObj.layer && resultObj.layer.name) {
+            targetLabel = " on layer '" + resultObj.layer.name + "'";
+        } else if (resultObj.duplicate && resultObj.duplicate.name) {
+            targetLabel = " on layer '" + resultObj.duplicate.name + "'";
+        } else if (resultObj.composition && resultObj.composition.name) {
+            targetLabel = " on comp '" + resultObj.composition.name + "'";
+        }
+
+        for (i = 0; i < resultObj.changed.length; i++) {
+            summary.push(type + targetLabel + ": " + resultObj.changed[i]);
+        }
+    }
+
+    if (!summary.length && resultObj.message) {
+        summary.push(resultObj.message);
+    }
+
+    return summary;
+}
+
 function preflightMutation(args) {
     try {
         args = args || {};
@@ -625,10 +870,13 @@ function preflightMutation(args) {
         var requested = null;
         var i = 0;
 
-        function pushPropertyInspection(prop) {
+        function pushPropertyInspection(prop, destination) {
             var inspected = inspectPropertyState(prop);
             if (inspected) {
                 response.inspectedProperties.push(inspected);
+                if (destination) {
+                    destination.push(inspected);
+                }
                 if (inspected.writable === false) {
                     response.checks.propertyWritable = false;
                 } else if (response.checks.propertyWritable !== false) {
@@ -715,6 +963,124 @@ function preflightMutation(args) {
                     composition: buildCompSummary(comp),
                     selectedLayers: buildLayerListSummary(comp.selectedLayers || [])
                 };
+                break;
+            case "runOperationBatch":
+                var operations = mutationArgs.operations || [];
+                if (!operations.length) {
+                    throw new Error("runOperationBatch requires at least one operation");
+                }
+                response.batch = {
+                    operationCount: operations.length,
+                    stopOnError: mutationArgs.stopOnError !== false,
+                    undoLabel: mutationArgs.undoLabel || "Operation Batch"
+                };
+                response.target = {
+                    composition: null,
+                    operationCount: operations.length
+                };
+                response.operations = [];
+
+                for (i = 0; i < operations.length; i++) {
+                    var batchOperation = operations[i];
+                    if (!batchOperation || typeof batchOperation !== "object") {
+                        throw new Error("Batch operation at index " + i + " must be an object");
+                    }
+
+                    var batchType = batchOperation.type || "";
+                    if (!isSupportedBatchOperationType(batchType)) {
+                        throw new Error("Unsupported batch operation type: " + batchType);
+                    }
+
+                    var batchArgs = buildBatchOperationArgs(mutationArgs, batchOperation);
+                    var batchEntry = {
+                        index: i + 1,
+                        type: batchType,
+                        target: null,
+                        inspectedProperties: []
+                    };
+
+                    switch (batchType) {
+                        case "createShapeLayer":
+                        case "createTextLayer":
+                        case "createSolidLayer":
+                        case "clearLayerSelection":
+                        case "setCompositionProperties":
+                            comp = resolveComposition(batchArgs);
+                            batchEntry.target = {
+                                composition: buildCompSummary(comp)
+                            };
+                            break;
+                        case "setLayerKeyframe":
+                        case "setLayerExpression":
+                            comp = resolveComposition(batchArgs);
+                            layer = resolveSingleLayerInComp(comp, batchArgs);
+                            property = resolvePropertyOnLayer(layer, batchArgs.propertyName);
+                            batchEntry.target = {
+                                composition: buildCompSummary(comp),
+                                layer: buildLayerSummary(layer),
+                                property: batchArgs.propertyName
+                            };
+                            pushPropertyInspection(property, batchEntry.inspectedProperties);
+                            break;
+                        case "setLayerProperties":
+                            comp = resolveComposition(batchArgs);
+                            layer = resolveSingleLayerInComp(comp, batchArgs);
+                            requested = listRequestedSetLayerProperties(batchArgs);
+                            batchEntry.target = {
+                                composition: buildCompSummary(comp),
+                                layer: buildLayerSummary(layer),
+                                properties: requested
+                            };
+                            for (var rp = 0; rp < requested.length; rp++) {
+                                pushPropertyInspection(resolvePropertyOnLayer(layer, requested[rp]), batchEntry.inspectedProperties);
+                            }
+                            break;
+                        case "duplicateLayer":
+                        case "deleteLayer":
+                            comp = resolveComposition(batchArgs);
+                            layer = resolveSingleLayerInComp(comp, batchArgs);
+                            batchEntry.target = {
+                                composition: buildCompSummary(comp),
+                                layer: buildLayerSummary(layer)
+                            };
+                            break;
+                        case "selectLayers":
+                            comp = resolveComposition(batchArgs);
+                            var preflightSelected = [];
+                            var preflightSeen = {};
+                            var preflightIndexed = resolveLayersByIndexes(comp, batchArgs.layerIndexes || []);
+                            for (var pix = 0; pix < preflightIndexed.length; pix++) {
+                                var preflightIndexedLayer = preflightIndexed[pix];
+                                if (!preflightSeen[preflightIndexedLayer.index]) {
+                                    preflightSelected.push(preflightIndexedLayer);
+                                    preflightSeen[preflightIndexedLayer.index] = true;
+                                }
+                            }
+                            var preflightNamed = batchArgs.layerNames && batchArgs.layerNames.length
+                                ? resolveMultipleLayersInComp(comp, { layerNames: batchArgs.layerNames })
+                                : [];
+                            for (var pnx = 0; pnx < preflightNamed.length; pnx++) {
+                                var preflightNamedLayer = preflightNamed[pnx];
+                                if (!preflightSeen[preflightNamedLayer.index]) {
+                                    preflightSelected.push(preflightNamedLayer);
+                                    preflightSeen[preflightNamedLayer.index] = true;
+                                }
+                            }
+                            if (!preflightSelected.length) {
+                                throw new Error("No layers resolved for batch selectLayers operation at index " + (i + 1));
+                            }
+                            batchEntry.target = {
+                                composition: buildCompSummary(comp),
+                                layers: buildLayerListSummary(preflightSelected)
+                            };
+                            break;
+                    }
+
+                    if (!response.target.composition && batchEntry.target && batchEntry.target.composition) {
+                        response.target.composition = batchEntry.target.composition;
+                    }
+                    response.operations.push(batchEntry);
+                }
                 break;
             case "setCompositionProperties":
                 comp = resolveComposition(mutationArgs);
@@ -829,11 +1195,17 @@ function inferCreatedItems(command, resultObj) {
     if (!resultObj) {
         return created;
     }
+    if (resultObj.created && resultObj.created.length) {
+        return resultObj.created;
+    }
     if (command === "createComposition" && resultObj.composition) {
         created.push({ type: "composition", name: resultObj.composition.name });
     }
     if ((command === "createTextLayer" || command === "createShapeLayer" || command === "createSolidLayer" || command === "createCamera") && resultObj.layer) {
         created.push({ type: "layer", name: resultObj.layer.name, index: resultObj.layer.index });
+    }
+    if (command === "duplicateLayer" && resultObj.duplicate) {
+        created.push({ type: "layer", name: resultObj.duplicate.name, index: resultObj.duplicate.index });
     }
     if (command === "setLayerMask" && resultObj.mask) {
         created.push({ type: "mask", name: resultObj.mask.name, index: resultObj.mask.index });
@@ -4904,6 +5276,306 @@ function setCompositionProperties(args) {
     }
 }
 
+function runOperationBatch(args) {
+    var undoGroupStarted = false;
+
+    try {
+        args = args || {};
+        var operations = args.operations || [];
+        if (!operations.length) {
+            throw new Error("runOperationBatch requires at least one operation");
+        }
+
+        var stopOnError = args.stopOnError !== false;
+        var undoLabel = args.undoLabel || "Operation Batch";
+        var transactionId = "txn-" + String(new Date().getTime());
+        var operationResults = [];
+        var failedOperations = [];
+        var skipped = [];
+        var created = [];
+        var changed = [];
+        var warnings = [];
+        var touchedLayers = [];
+        var touchedLayerMap = {};
+        var compositionsTouched = [];
+        var compositionsTouchedMap = {};
+
+        function rememberCompositionSummary(compSummary) {
+            if (!compSummary) {
+                return null;
+            }
+            var compKey = compSummary.id ? String(compSummary.id) : (compSummary.index ? String(compSummary.index) : String(compSummary.name || ""));
+            if (!compositionsTouchedMap[compKey]) {
+                compositionsTouchedMap[compKey] = true;
+                compositionsTouched.push(compSummary);
+            }
+            return compSummary;
+        }
+
+        function rememberSkippedOperations(startIndex) {
+            for (var skipIndex = startIndex; skipIndex < operations.length; skipIndex++) {
+                skipped.push({
+                    index: skipIndex + 1,
+                    type: operations[skipIndex] && operations[skipIndex].type ? operations[skipIndex].type : null,
+                    reason: "Skipped because stopOnError halted the transaction."
+                });
+            }
+        }
+
+        function collectLayerRefs(resultObj) {
+            var refs = [];
+            var localSeen = {};
+
+            function pushRef(ref) {
+                if (!ref) {
+                    return;
+                }
+                var key = "";
+                if (hasValue(ref.index)) {
+                    key = "index:" + ref.index;
+                } else if (hasValue(ref.name)) {
+                    key = "name:" + ref.name;
+                } else {
+                    return;
+                }
+                if (!localSeen[key]) {
+                    refs.push(ref);
+                    localSeen[key] = true;
+                }
+            }
+
+            if (resultObj.layer) {
+                pushRef(resultObj.layer);
+            }
+            if (resultObj.duplicate) {
+                pushRef(resultObj.duplicate);
+            }
+            if (resultObj.selectedLayers && resultObj.selectedLayers.length) {
+                for (var sl = 0; sl < resultObj.selectedLayers.length; sl++) {
+                    pushRef(resultObj.selectedLayers[sl]);
+                }
+            }
+            if (resultObj.clearedLayers && resultObj.clearedLayers.length) {
+                for (var cl = 0; cl < resultObj.clearedLayers.length; cl++) {
+                    pushRef(resultObj.clearedLayers[cl]);
+                }
+            }
+
+            return refs;
+        }
+
+        function rememberTouchedLayer(comp, layerRef) {
+            if (!comp || !layerRef) {
+                return null;
+            }
+            var layer = resolveLayerReferenceInComp(comp, layerRef);
+            if (!layer) {
+                return null;
+            }
+            var compSummary = rememberCompositionSummary(buildCompSummary(comp));
+            var layerKey = String(comp.id || comp.name || "comp") + "::" + String(layer.index);
+            if (!touchedLayerMap[layerKey]) {
+                touchedLayerMap[layerKey] = true;
+                var layerSummary = buildCompactLayerValidationSummary(layer);
+                layerSummary.composition = compSummary;
+                touchedLayers.push(layerSummary);
+            }
+            return layer;
+        }
+
+        function collectTouchedLayersFromResult(comp, resultObj) {
+            var refs = collectLayerRefs(resultObj);
+            var collected = [];
+            for (var ri = 0; ri < refs.length; ri++) {
+                var touchedLayer = rememberTouchedLayer(comp, refs[ri]);
+                if (touchedLayer) {
+                    collected.push({
+                        index: touchedLayer.index,
+                        name: touchedLayer.name,
+                        type: getLayerType(touchedLayer)
+                    });
+                }
+            }
+            return collected;
+        }
+
+        rememberCompositionSummary((function() {
+            try {
+                return buildCompSummary(resolveComposition(args));
+            } catch (compositionError) {
+                return null;
+            }
+        })());
+
+        app.beginUndoGroup(undoLabel);
+        undoGroupStarted = true;
+
+        for (var i = 0; i < operations.length; i++) {
+            var operation = operations[i];
+            if (!operation || typeof operation !== "object") {
+                var invalidOperation = {
+                    index: i + 1,
+                    type: null,
+                    status: "error",
+                    message: "Batch operation must be an object",
+                    target: null,
+                    created: [],
+                    changed: [],
+                    warnings: []
+                };
+                operationResults.push(invalidOperation);
+                failedOperations.push(invalidOperation);
+                if (stopOnError) {
+                    rememberSkippedOperations(i + 1);
+                    break;
+                }
+                continue;
+            }
+
+            var type = operation.type || "";
+            var operationArgs = buildBatchOperationArgs(args, operation);
+            var operationComp = null;
+            var operationEntry = {
+                index: i + 1,
+                type: type,
+                status: "success",
+                message: "",
+                target: null,
+                created: [],
+                changed: [],
+                warnings: [],
+                validation: []
+            };
+
+            if (!isSupportedBatchOperationType(type)) {
+                operationEntry.status = "error";
+                operationEntry.message = "Unsupported batch operation type: " + type;
+                operationResults.push(operationEntry);
+                failedOperations.push(operationEntry);
+                if (stopOnError) {
+                    rememberSkippedOperations(i + 1);
+                    break;
+                }
+                continue;
+            }
+
+            try {
+                try {
+                    operationComp = resolveComposition(operationArgs);
+                    rememberCompositionSummary(buildCompSummary(operationComp));
+                } catch (operationCompError) {
+                    operationComp = null;
+                }
+
+                var rawResult = executeBatchOperationByType(type, operationArgs);
+                var normalizedResult = normalizeOperationResult(type, operationArgs, rawResult);
+
+                operationEntry.status = normalizedResult.status === "error" ? "error" : "success";
+                operationEntry.message = normalizedResult.message || "";
+                operationEntry.target = normalizedResult.target || null;
+                operationEntry.created = normalizedResult.created || [];
+                operationEntry.changed = normalizedResult.changed || [];
+                operationEntry.warnings = normalizedResult.warnings || [];
+                if (normalizedResult.composition) {
+                    rememberCompositionSummary(normalizedResult.composition);
+                }
+
+                if (operationEntry.status === "error") {
+                    operationResults.push(operationEntry);
+                    failedOperations.push(operationEntry);
+                    if (stopOnError) {
+                        rememberSkippedOperations(i + 1);
+                        break;
+                    }
+                    continue;
+                }
+
+                for (var ci = 0; ci < operationEntry.created.length; ci++) {
+                    created.push(operationEntry.created[ci]);
+                }
+                var changeSummary = summarizeBatchOperationChanges(type, normalizedResult);
+                for (var ch = 0; ch < changeSummary.length; ch++) {
+                    changed.push(changeSummary[ch]);
+                }
+                operationEntry.validation = collectTouchedLayersFromResult(operationComp, normalizedResult);
+                operationResults.push(operationEntry);
+            } catch (operationError) {
+                operationEntry.status = "error";
+                operationEntry.message = operationError.toString();
+                operationResults.push(operationEntry);
+                failedOperations.push(operationEntry);
+                if (stopOnError) {
+                    rememberSkippedOperations(i + 1);
+                    break;
+                }
+            }
+        }
+
+        if (failedOperations.length && !stopOnError && operationResults.length > failedOperations.length) {
+            warnings.push("One or more operations failed, but the batch continued because stopOnError was false.");
+        }
+        if (skipped.length) {
+            warnings.push("Remaining operations were skipped after the first failure.");
+        }
+
+        var succeededCount = operationResults.length - failedOperations.length;
+        var status = "success";
+        if (failedOperations.length && succeededCount > 0) {
+            status = "warning";
+        } else if (failedOperations.length) {
+            status = "error";
+        }
+
+        var message = "Operation batch completed successfully.";
+        if (failedOperations.length && succeededCount > 0) {
+            message = "Operation batch completed with partial failures.";
+        } else if (failedOperations.length) {
+            message = "Operation batch failed.";
+        }
+
+        var composition = compositionsTouched.length ? compositionsTouched[0] : null;
+        if (compositionsTouched.length > 1) {
+            warnings.push("Batch touched multiple compositions; inspect compositionsTouched for exact scope.");
+        }
+
+        return JSON.stringify({
+            status: status,
+            message: message,
+            transactionId: transactionId,
+            composition: composition,
+            compositionsTouched: compositionsTouched,
+            undoLabel: undoLabel,
+            stopOnError: stopOnError,
+            operationCount: operations.length,
+            succeededCount: succeededCount,
+            failedCount: failedOperations.length,
+            skippedCount: skipped.length,
+            validationSummary: {
+                touchedLayerCount: touchedLayers.length,
+                touchedLayers: touchedLayers
+            },
+            created: created,
+            changed: changed,
+            warnings: warnings,
+            touchedLayers: touchedLayers,
+            failedOperations: failedOperations,
+            skipped: skipped,
+            operations: operationResults
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({
+            status: "error",
+            message: error.toString()
+        }, null, 2);
+    } finally {
+        if (undoGroupStarted) {
+            try {
+                app.endUndoGroup();
+            } catch (undoError) {}
+        }
+    }
+}
+
 // Functions for each script type
 function getProjectInfo() {
     var project = app.project;
@@ -5000,38 +5672,62 @@ function listCompositions() {
     return JSON.stringify(result, null, 2);
 }
 
-function getLayerInfo() {
-    var project = app.project;
-    var result = {
-        layers: []
-    };
-    
-    // Get the active composition
-    var activeComp = null;
-    if (app.project.activeItem instanceof CompItem) {
-        activeComp = app.project.activeItem;
-    } else {
-        return JSON.stringify({ error: "No active composition" }, null, 2);
-    }
-    
-    // Loop through layers in the active composition
-    for (var i = 1; i <= activeComp.numLayers; i++) {
-        var layer = activeComp.layer(i);
-        var layerInfo = {
-            index: layer.index,
-            name: layer.name,
-            enabled: layer.enabled,
-            locked: layer.locked,
-            threeDLayer: layer.threeDLayer,
-            position: layer.property("Position").value,
-            inPoint: layer.inPoint,
-            outPoint: layer.outPoint
+function getLayerInfo(args) {
+    try {
+        args = args || {};
+        var comp = resolveComposition(args);
+        var includeEffects = args.includeEffects === true;
+        var includeMasks = args.includeMasks === true;
+        var includeExpressions = args.includeExpressions !== false;
+        var hasExactTarget = hasValue(args.layerName) || hasValue(args.layerIndex) || args.useSelectedLayer === true;
+
+        if (hasExactTarget) {
+            var layer = resolveSingleLayerInComp(comp, args);
+            var layerInfo = buildCompactLayerValidationSummary(layer);
+            if (includeEffects) {
+                layerInfo.effects = buildEffectsSummary(layer);
+            }
+            if (includeMasks) {
+                layerInfo.masks = buildMasksSummary(layer);
+            }
+            if (!includeExpressions) {
+                delete layerInfo.expressions;
+            }
+
+            return JSON.stringify({
+                status: "success",
+                message: "Targeted layer info retrieved successfully",
+                composition: buildCompSummary(comp),
+                layer: layerInfo
+            }, null, 2);
+        }
+
+        var result = {
+            status: "success",
+            message: "Layer info retrieved successfully",
+            composition: buildCompSummary(comp),
+            layers: []
         };
-        
-        result.layers.push(layerInfo);
+
+        for (var i = 1; i <= comp.numLayers; i++) {
+            var currentLayer = comp.layer(i);
+            result.layers.push({
+                index: currentLayer.index,
+                name: currentLayer.name,
+                type: getLayerType(currentLayer),
+                enabled: currentLayer.enabled,
+                locked: currentLayer.locked,
+                threeDLayer: currentLayer.threeDLayer === true,
+                position: currentLayer.property("Position").value,
+                inPoint: currentLayer.inPoint,
+                outPoint: currentLayer.outPoint
+            });
+        }
+
+        return JSON.stringify(result, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
     }
-    
-    return JSON.stringify(result, null, 2);
 }
 
 // Execute command
@@ -5093,7 +5789,7 @@ function executeCommand(command, args, commandData) {
                 result = listCompositions();
                 break;
             case "getLayerInfo":
-                result = getLayerInfo();
+                result = getLayerInfo(args);
                 break;
             case "createComposition":
                 logToPanel("Calling createComposition function...");
@@ -5234,6 +5930,11 @@ function executeCommand(command, args, commandData) {
                 logToPanel("Calling setLayerMask function...");
                 result = setLayerMask(args);
                 logToPanel("Returned from setLayerMask.");
+                break;
+            case "runOperationBatch":
+                logToPanel("Calling runOperationBatch function...");
+                result = runOperationBatch(args);
+                logToPanel("Returned from runOperationBatch.");
                 break;
             default:
                 result = JSON.stringify({ error: "Unknown command: " + command });

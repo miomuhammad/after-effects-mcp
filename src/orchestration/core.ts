@@ -1,4 +1,8 @@
-import { findWrapperCandidates } from "./wrapperRegistry.js";
+import {
+  assessTransactionCandidate,
+  findWrapperCandidates,
+  type RoutePreference
+} from "./wrapperRegistry.js";
 
 export type OrchestrationDomain = "create" | "animate" | "rig" | "cleanup" | "effect" | "render" | "unknown";
 export type OrchestrationIntent =
@@ -46,6 +50,12 @@ export type ExecutionRoute = {
   };
   wrapperCandidates: Array<Record<string, unknown>>;
   selectedWrapperId: string | null;
+  preferredRoute: RoutePreference;
+  routeLadder: RoutePreference[];
+  transactionEligible: boolean;
+  transactionScore: number;
+  recommendedCommand: string | null;
+  routingReasons: string[];
   routeReady: boolean;
 };
 
@@ -146,12 +156,38 @@ export function resolveExecutionRoute(request: string, explicitIntent?: string):
   const classified = classifyIntent(request, explicitIntent);
   const wrapperCandidates = findWrapperCandidates(request, 5);
   const selectedWrapperId = wrapperCandidates.length > 0 ? String(wrapperCandidates[0].id) : null;
-  const routeReady = classified.intent !== "unknown";
+  const transaction = assessTransactionCandidate(request);
+  const routeLadder: RoutePreference[] = ["wrapper", "low-level", "transaction", "raw-jsx-fallback"];
+  const routingReasons: string[] = [];
+  let preferredRoute: RoutePreference = "raw-jsx-fallback";
+
+  if (selectedWrapperId) {
+    preferredRoute = "wrapper";
+    routingReasons.push(`Matched wrapper candidate '${selectedWrapperId}'.`);
+  } else if (classified.intent !== "unknown") {
+    preferredRoute = "low-level";
+    routingReasons.push(`Intent '${classified.intent}' maps to an existing deterministic low-level/wrapper flow.`);
+  } else if (transaction.eligible) {
+    preferredRoute = "transaction";
+    routingReasons.push(...transaction.reasons);
+    routingReasons.push("No stable wrapper matched, so the internal transaction layer is the preferred middle route.");
+  } else {
+    preferredRoute = "raw-jsx-fallback";
+    routingReasons.push("No wrapper, deterministic low-level route, or transaction signal was strong enough.");
+  }
+
+  const routeReady = preferredRoute !== "raw-jsx-fallback";
 
   return {
     classified,
     wrapperCandidates,
     selectedWrapperId,
+    preferredRoute,
+    routeLadder,
+    transactionEligible: transaction.eligible,
+    transactionScore: transaction.score,
+    recommendedCommand: preferredRoute === "transaction" ? "runOperationBatch" : null,
+    routingReasons,
     routeReady
   };
 }

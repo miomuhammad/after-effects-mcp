@@ -11,8 +11,99 @@ import {
   CompositionTargetingSchema,
   GenericLayerPropertiesShape,
   KeyframeValueSchema,
+  LayerSelectionSchema,
   LayerTargetingSchema
 } from "../toolSchemas.js";
+
+const OperationBatchOperationSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("createShapeLayer"),
+    ...CompositionTargetingSchema,
+    name: z.string().optional(),
+    shapeType: z.enum(["rectangle", "ellipse", "polygon", "star"]).optional(),
+    position: z.array(z.number()).optional(),
+    size: z.array(z.number()).optional(),
+    fillColor: z.array(z.number()).optional(),
+    strokeColor: z.array(z.number()).optional(),
+    strokeWidth: z.number().optional(),
+    startTime: z.number().optional(),
+    duration: z.number().positive().optional(),
+    points: z.number().int().positive().optional()
+  }).passthrough(),
+  z.object({
+    type: z.literal("createTextLayer"),
+    ...CompositionTargetingSchema,
+    text: z.string().optional(),
+    position: z.array(z.number()).optional(),
+    fontSize: z.number().positive().optional(),
+    color: z.array(z.number()).optional(),
+    startTime: z.number().optional(),
+    duration: z.number().positive().optional(),
+    fontFamily: z.string().optional(),
+    alignment: z.enum(["left", "center", "right"]).optional()
+  }).passthrough(),
+  z.object({
+    type: z.literal("createSolidLayer"),
+    ...CompositionTargetingSchema,
+    name: z.string().optional(),
+    color: z.array(z.number()).optional(),
+    position: z.array(z.number()).optional(),
+    size: z.array(z.number()).optional(),
+    startTime: z.number().optional(),
+    duration: z.number().positive().optional(),
+    isAdjustment: z.boolean().optional()
+  }).passthrough(),
+  z.object({
+    type: z.literal("setLayerProperties"),
+    ...LayerTargetingSchema,
+    ...GenericLayerPropertiesShape,
+    duration: z.number().positive().optional(),
+    text: z.string().optional(),
+    fontFamily: z.string().optional(),
+    fontSize: z.number().positive().optional(),
+    fillColor: z.array(z.number()).optional(),
+    trackMatteType: z.string().optional()
+  }).passthrough(),
+  z.object({
+    type: z.literal("setLayerKeyframe"),
+    ...LayerTargetingSchema,
+    propertyName: z.string(),
+    timeInSeconds: z.number().optional(),
+    time: z.number().optional(),
+    value: KeyframeValueSchema
+  }).passthrough(),
+  z.object({
+    type: z.literal("setLayerExpression"),
+    ...LayerTargetingSchema,
+    propertyName: z.string(),
+    expressionString: z.string()
+  }).passthrough(),
+  z.object({
+    type: z.literal("deleteLayer"),
+    ...LayerTargetingSchema
+  }).passthrough(),
+  z.object({
+    type: z.literal("duplicateLayer"),
+    ...LayerTargetingSchema,
+    newName: z.string().optional()
+  }).passthrough(),
+  z.object({
+    type: z.literal("clearLayerSelection"),
+    ...CompositionTargetingSchema
+  }).passthrough(),
+  z.object({
+    type: z.literal("selectLayers"),
+    ...LayerSelectionSchema
+  }).passthrough(),
+  z.object({
+    type: z.literal("setCompositionProperties"),
+    ...CompositionTargetingSchema,
+    duration: z.number().positive().optional(),
+    frameRate: z.number().positive().optional(),
+    width: z.number().int().positive().optional(),
+    height: z.number().int().positive().optional()
+  }).passthrough()
+]);
 
 export function registerMutationTools(deps: {
   server: ToolServer;
@@ -34,6 +125,28 @@ export function registerMutationTools(deps: {
     buildStructuredSafetyError,
     safetyRoutingDependencies
   } = deps;
+
+  server.tool(
+    "runOperationBatch",
+    "Execute an allowlisted ordered batch of AE mutations inside one bridge-native undo group.",
+    {
+      ...CompositionTargetingSchema,
+      undoLabel: z.string().optional().describe("Single undo label for the entire batch. Defaults to 'Operation Batch'."),
+      stopOnError: z.boolean().optional().describe("Stop at the first failed operation. Defaults to true."),
+      operations: z.array(OperationBatchOperationSchema).min(1).max(100).describe("Ordered operation list executed inside one transaction.")
+    },
+    async (parameters: Record<string, unknown>) => {
+      try {
+        const payload = await queueMutationWithSafety("runOperationBatch", parameters, {}, safetyRoutingDependencies);
+        return formatToolPayload(payload);
+      } catch (error) {
+        return formatToolPayload(
+          buildStructuredSafetyError(error, "RUN_OPERATION_BATCH_FAILED", "Failed to queue runOperationBatch."),
+          true
+        );
+      }
+    }
+  );
 
   server.tool(
     "create-background-solid",

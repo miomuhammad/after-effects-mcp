@@ -7,7 +7,8 @@ import { ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
 const repoRoot = process.cwd();
 const promptReportPath = path.join(repoRoot, "docs", "plansv3", "reports", "08-prompt-regression-latest.json");
 const reliabilityReportPath = path.join(repoRoot, "docs", "plansv5", "reports", "07-phase-5-reliability-smoke-latest.json");
-const outputPath = path.join(repoRoot, "docs", "plansv3", "reports", "09-release-readiness-latest.json");
+const v6SmokeReportPath = path.join(repoRoot, "docs", "plansv6", "reports", "01-v6-transaction-smoke-latest.json");
+const outputPath = path.join(repoRoot, "docs", "plansv6", "reports", "02-v6-release-readiness-latest.json");
 
 const legacyRequiredTools = [
   "run-script",
@@ -47,6 +48,14 @@ const v3RequiredTools = [
   "get-operation-log"
 ];
 
+const v6RequiredTools = [
+  "runOperationBatch",
+  "runtime-layer-details",
+  "inspect-bridge-health",
+  "recover-bridge-state",
+  "cleanup-bridge-journal"
+];
+
 function countPresent(required, actual) {
   return {
     required,
@@ -76,11 +85,15 @@ async function listServerTools() {
 const toolNames = await listServerTools();
 const legacyMatrix = countPresent(legacyRequiredTools, toolNames);
 const v3Matrix = countPresent(v3RequiredTools, toolNames);
+const v6Matrix = countPresent(v6RequiredTools, toolNames);
 const promptReport = fs.existsSync(promptReportPath)
   ? JSON.parse(fs.readFileSync(promptReportPath, "utf8"))
   : null;
 const reliabilityReport = fs.existsSync(reliabilityReportPath)
   ? JSON.parse(fs.readFileSync(reliabilityReportPath, "utf8"))
+  : null;
+const v6SmokeReport = fs.existsSync(v6SmokeReportPath)
+  ? JSON.parse(fs.readFileSync(v6SmokeReportPath, "utf8"))
   : null;
 
 const report = {
@@ -95,6 +108,11 @@ const report = {
     requiredCount: v3Matrix.required.length,
     presentCount: v3Matrix.present.length,
     missing: v3Matrix.missing
+  },
+  v6Coverage: {
+    requiredCount: v6Matrix.required.length,
+    presentCount: v6Matrix.present.length,
+    missing: v6Matrix.missing
   },
   benchmarkSnapshot: promptReport
     ? {
@@ -111,15 +129,29 @@ const report = {
         passRate: reliabilityReport.summary?.passRate ?? null
       }
     : null,
-  releaseDecision: legacyMatrix.missing.length === 0 && v3Matrix.missing.length === 0
-    ? "ready-with-documented-risks"
-    : "not-ready-missing-tool-surface",
+  v6SmokeSnapshot: v6SmokeReport
+    ? {
+        generatedAt: v6SmokeReport.generatedAt || null,
+        passed: v6SmokeReport.summary?.passed ?? null,
+        total: v6SmokeReport.summary?.total ?? null,
+        passRate: v6SmokeReport.summary?.passRate ?? null,
+        fatal: v6SmokeReport.fatal || null
+      }
+    : null,
+  releaseDecision: legacyMatrix.missing.length > 0 || v3Matrix.missing.length > 0 || v6Matrix.missing.length > 0
+    ? "not-ready-missing-tool-surface"
+    : !v6SmokeReport
+      ? "not-ready-v6-live-smoke-missing"
+      : (v6SmokeReport.summary?.passed === v6SmokeReport.summary?.total)
+        ? "ready-with-documented-risks"
+        : "not-ready-v6-validation-failed",
   deferredRisks: [
     "createNullObject is still deferred as a first-class MCP tool",
-    "live AE validation still depends on manual host smoke tests",
+    "live AE validation still depends on the bridge panel being open in After Effects 17.7 / 2020",
     "prompt benchmark sample size is still small and should expand over time"
   ]
 };
 
+fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 fs.writeFileSync(outputPath, JSON.stringify(report, null, 2));
 console.log(JSON.stringify(report, null, 2));

@@ -5,6 +5,10 @@ import type {
   QueueBridgeCommand,
   ToolServer
 } from "../toolContracts.js";
+import {
+  CompositionTargetingSchema,
+  LayerTargetingSchema
+} from "../toolSchemas.js";
 
 export function registerBasicTools(deps: {
   server: ToolServer;
@@ -57,11 +61,17 @@ export function registerBasicTools(deps: {
 
   server.tool(
     "getLayerInfo",
-    "Legacy compatibility tool for reading layer information in the active composition.",
-    {},
-    async () => {
+    "Legacy compatibility tool for reading layer information, with optional exact layer targeting.",
+    {
+      ...CompositionTargetingSchema,
+      ...LayerTargetingSchema,
+      includeEffects: z.boolean().optional().describe("When true, include effect summaries for exact layer lookups."),
+      includeMasks: z.boolean().optional().describe("When true, include mask summaries for exact layer lookups."),
+      includeExpressions: z.boolean().optional().describe("When true, include expression summaries for exact layer lookups.")
+    },
+    async (parameters: Record<string, unknown>) => {
       try {
-        const commandId = await queueBridgeCommand("getLayerInfo", {});
+        const commandId = await queueBridgeCommand("getLayerInfo", parameters);
         return buildQueuedBridgeToolResponse("getLayerInfo", commandId);
       } catch (error) {
         return formatToolPayload({

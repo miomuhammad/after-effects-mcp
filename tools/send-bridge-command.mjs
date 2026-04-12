@@ -2,6 +2,9 @@ import fs from "fs";
 import path from "path";
 import {
   parseCliArgs,
+  parseJsonObjectText,
+  readJsonObjectFile,
+  readJsonObjectFromStdin,
   resolveBridgeDir,
   waitForResultByCommandId
 } from "./bridge-cli-utils.mjs";
@@ -17,6 +20,7 @@ Options:
   --command <name>         Required. Bridge command name.
   --args-json <json>       Optional. JSON object string for args.
   --args-file <path>       Optional. Path to JSON file for args.
+  --args-stdin             Optional. Read JSON object args from stdin.
   --wait                   Optional. Wait for matching result by commandId.
   --timeout-ms <number>    Optional. Default 12000.
   --poll-ms <number>       Optional. Default 250.
@@ -24,34 +28,32 @@ Options:
   --help                   Show this help.
 
 Examples:
-  npm run bridge:send -- --command getProjectInfo --wait
-  npm run bridge:send -- --command createShapeLayer --args-json "{\\"shapeType\\":\\"ellipse\\",\\"name\\":\\"Bola\\"}" --wait
-  npm run bridge:send -- --command setLayerExpression --args-file .\\payloads\\expr.json --wait
+  node tools/send-bridge-command.mjs --command getProjectInfo --wait
+  node tools/send-bridge-command.mjs --command createShapeLayer --args-file .\\payloads\\ball.json --wait
+  Get-Content .\\payloads\\batch.json | node tools/send-bridge-command.mjs --command runOperationBatch --args-stdin --wait
 `.trim());
 }
 
-function loadArgs(options) {
+async function loadArgs(options) {
   const hasJson = Boolean(options["args-json"]);
   const hasFile = Boolean(options["args-file"]);
-  if (hasJson && hasFile) {
-    throw new Error("Use either --args-json or --args-file, not both.");
+  const hasStdin = Boolean(options["args-stdin"]);
+  const inputCount = [hasJson, hasFile, hasStdin].filter(Boolean).length;
+  if (inputCount > 1) {
+    throw new Error("Use only one of --args-json, --args-file, or --args-stdin.");
   }
 
   if (hasJson) {
-    const parsed = JSON.parse(String(options["args-json"]));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("--args-json must decode to a JSON object.");
-    }
-    return parsed;
+    return parseJsonObjectText(String(options["args-json"]), "--args-json");
   }
 
   if (hasFile) {
     const filePath = path.resolve(String(options["args-file"]));
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("--args-file must contain a JSON object.");
-    }
-    return parsed;
+    return readJsonObjectFile(filePath);
+  }
+
+  if (hasStdin) {
+    return await readJsonObjectFromStdin();
   }
 
   return {};
@@ -71,7 +73,7 @@ async function main() {
     return;
   }
 
-  const args = loadArgs(options);
+  const args = await loadArgs(options);
   const bridgeDir = resolveBridgeDir(options["bridge-dir"] ? String(options["bridge-dir"]) : "");
   const commandFilePath = path.join(bridgeDir, "ae_command.json");
   const commandQueueDir = path.join(bridgeDir, "commands");
@@ -135,4 +137,3 @@ main().catch((error) => {
   }, null, 2));
   process.exitCode = 1;
 });
-

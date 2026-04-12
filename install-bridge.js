@@ -13,7 +13,8 @@ const __dirname = path.dirname(__filename);
 const isMac = process.platform === 'darwin';
 const isWindows = process.platform === 'win32';
 const requestedVersionArg = process.argv.find((arg) => arg.startsWith('--ae-version='));
-const requestedVersion = process.env.AE_VERSION || (requestedVersionArg ? requestedVersionArg.split('=')[1] : null);
+const repoPreferredVersion = '2020';
+const requestedVersion = process.env.AE_VERSION || (requestedVersionArg ? requestedVersionArg.split('=')[1] : repoPreferredVersion);
 const requestedPath = process.env.AE_PATH || null;
 
 // Possible After Effects installation paths (common locations)
@@ -82,9 +83,9 @@ if (!afterEffectsPath) {
   process.exit(1);
 }
 
-if (!requestedPath && !requestedVersion && installedPaths.length > 1) {
+if (!requestedPath && installedPaths.length > 1) {
   console.warn(`Multiple After Effects installations found. Using: ${afterEffectsPath}`);
-  console.warn('Set AE_VERSION or AE_PATH to target a different version.');
+  console.warn('Set AE_VERSION or AE_PATH to target a different version if needed.');
 }
 
 // Define source and destination paths

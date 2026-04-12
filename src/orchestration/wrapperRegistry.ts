@@ -2,6 +2,7 @@ export type WrapperDomain = "create" | "animate" | "rig" | "cleanup" | "effect" 
 export type WrapperStatus = "existing-wrapper" | "existing-low-level" | "planned-wrapper";
 export type WrapperSafetyClass = "low" | "medium" | "high";
 export type WrapperFallbackMax = "none" | "curated" | "ad-hoc";
+export type RoutePreference = "wrapper" | "low-level" | "transaction" | "raw-jsx-fallback";
 
 export type WrapperDefinition = {
   id: string;
@@ -328,4 +329,70 @@ export function findWrapperCandidates(request: string, limit = 5) {
       score: entry.score,
       ...entry.wrapper
     }));
+}
+
+export function assessTransactionCandidate(request: string): {
+  eligible: boolean;
+  score: number;
+  reasons: string[];
+} {
+  const text = String(request || "").toLowerCase();
+  const reasons: string[] = [];
+  let score = 0;
+
+  const actionSignals = [
+    "create",
+    "add",
+    "animate",
+    "build",
+    "make",
+    "link",
+    "duplicate",
+    "delete",
+    "set",
+    "apply",
+    "rig",
+    "setup",
+    "compose"
+  ];
+  const actionHitCount = actionSignals.filter((signal) => text.includes(signal)).length;
+  if (actionHitCount >= 3) {
+    score += 2;
+    reasons.push("Request includes several mutation verbs, suggesting a grouped multi-step workflow.");
+  }
+
+  if (
+    text.includes(" and then ") ||
+    text.includes(" lalu ") ||
+    text.includes(" kemudian ") ||
+    text.includes(" setelah itu ") ||
+    text.includes(" plus ") ||
+    text.includes(" then ")
+  ) {
+    score += 2;
+    reasons.push("Request includes ordered sequencing language.");
+  }
+
+  if (
+    /\b\d+\s+layer/.test(text) ||
+    text.includes("multi-step") ||
+    text.includes("one undo") ||
+    text.includes("scene") ||
+    text.includes("build a") ||
+    text.includes("assemble")
+  ) {
+    score += 2;
+    reasons.push("Request looks like a one-off additive build with multiple related elements.");
+  }
+
+  if (text.length >= 120) {
+    score += 1;
+    reasons.push("Prompt length suggests a richer workflow than a single low-level command.");
+  }
+
+  return {
+    eligible: score >= 3,
+    score,
+    reasons
+  };
 }

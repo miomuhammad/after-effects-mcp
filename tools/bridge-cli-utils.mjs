@@ -55,10 +55,51 @@ export function readJsonIfExists(filePath) {
     return null;
   }
   try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return JSON.parse(stripUtf8Bom(fs.readFileSync(filePath, "utf8")));
   } catch {
     return null;
   }
+}
+
+export function stripUtf8Bom(text) {
+  const value = String(text ?? "");
+  return value.charCodeAt(0) === 0xfeff ? value.slice(1) : value;
+}
+
+export function parseJsonObjectText(text, sourceLabel = "JSON input") {
+  const parsed = JSON.parse(stripUtf8Bom(text));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${sourceLabel} must decode to a JSON object.`);
+  }
+  return parsed;
+}
+
+export function readJsonObjectFile(filePath) {
+  return parseJsonObjectText(fs.readFileSync(filePath, "utf8"), "--args-file");
+}
+
+export async function readStdinText() {
+  if (process.stdin.isTTY) {
+    return "";
+  }
+
+  return await new Promise((resolve, reject) => {
+    let buffer = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      buffer += chunk;
+    });
+    process.stdin.on("end", () => resolve(buffer));
+    process.stdin.on("error", reject);
+  });
+}
+
+export async function readJsonObjectFromStdin() {
+  const stdinText = await readStdinText();
+  if (!stdinText.trim()) {
+    throw new Error("--args-stdin was provided, but stdin was empty.");
+  }
+  return parseJsonObjectText(stdinText, "--args-stdin");
 }
 
 export function parseCliArgs(argv) {

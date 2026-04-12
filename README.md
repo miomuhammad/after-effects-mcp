@@ -260,6 +260,24 @@ Quick queue + wait:
 npm run bridge:send -- --command getProjectInfo --wait
 ```
 
+Canonical Windows fallback when `npm run ... -- ...` quoting gets messy:
+
+```bash
+node tools/send-bridge-command.mjs --command getProjectInfo --wait
+```
+
+Structured args from file:
+
+```bash
+node tools/send-bridge-command.mjs --command runOperationBatch --args-file .\payloads\batch.json --wait
+```
+
+Structured args from stdin:
+
+```powershell
+Get-Content .\payloads\batch.json | node tools/send-bridge-command.mjs --command runOperationBatch --args-stdin --wait
+```
+
 Wait for an existing command id:
 
 ```bash
@@ -278,9 +296,13 @@ npm run wrapper:maker -- scaffold --from-candidate bounce-drop
 
 Reference:
 - [`tools/wrapper-maker/README.md`](tools/wrapper-maker/README.md)
+- `npm run smoke:v6`
+- `npm run release-readiness`
 
 Note:
 - `run-script` runtime calls are auto-logged to `.local/wrapper-maker/adhoc-usage.jsonl` for candidate mining.
+- `runOperationBatch` is the V6 internal transaction path for one-off multi-step builds.
+- `runtime-layer-details` and exact-target `getLayerInfo` are the preferred follow-up validation tools after a batch.
 
 ### 🤝 Contributing
 

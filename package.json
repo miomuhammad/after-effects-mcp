@@ -11,6 +11,7 @@
     "install-bridge": "node install-bridge.js",
     "evaluate-prompts": "node tools/evaluate-prompt-suite.mjs",
     "smoke:bridge": "node tools/bridge-reliability-smoke.mjs",
+    "smoke:v6": "node tools/v6-transaction-smoke.mjs",
     "bridge:send": "node tools/send-bridge-command.mjs",
     "bridge:wait": "node tools/wait-bridge-result.mjs",
     "wrapper:maker": "node tools/wrapper-maker/index.mjs",

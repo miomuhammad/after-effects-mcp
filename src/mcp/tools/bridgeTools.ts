@@ -472,6 +472,7 @@ export function registerBridgeTools(deps: {
         "duplicateLayer",
         "deleteLayer",
         "setLayerMask",
+        "runOperationBatch",
         "preflightMutation",
         "prepareProjectCheckpoint",
         "restoreCheckpoint"
@@ -496,10 +497,12 @@ export function registerBridgeTools(deps: {
         if (executionMode === "queue_only") {
           if (safety.isMutation) {
             const payload = await queueMutationWithSafety(script, sanitizedParameters, { allowForceWithoutCheckpoint: true }, safetyRoutingDependencies);
+            const payloadCommandId = typeof payload?.commandId === "string" ? payload.commandId : null;
+            const payloadFailureClass = typeof payload?.failureClass === "string" ? payload.failureClass : null;
             trackRuntimeUsage({
               status: payload?.status === "error" ? "error" : "queued",
-              commandId: payload?.commandId || null,
-              failureClass: payload?.failureClass || null,
+              commandId: payloadCommandId,
+              failureClass: payloadFailureClass,
               metadata: { via: "queueMutationWithSafety" }
             });
             return formatToolPayload(payload);

@@ -58,10 +58,39 @@ For normal AE production work, choose execution in this order:
 
 1. use a v2 wrapper if one exists
 2. use an existing low-level MCP tool if the task is simple and direct
-3. use a curated direct ExtendScript transaction if the workflow is multi-step but already clear
-4. write fresh ad-hoc ExtendScript only if no safe wrapper or existing fallback can complete the task
+3. use `runOperationBatch` if the workflow is a novel multi-step build that is still expressible through the internal allowlist
+4. use a curated direct ExtendScript transaction only if the internal transaction layer cannot safely express the workflow
+5. write fresh ad-hoc ExtendScript only if no safe wrapper or existing fallback can complete the task
 
 Do not spend tokens rediscovering old ScriptUI panel files if a wrapper already covers the task.
+
+## Transaction Boundary
+
+Use `runOperationBatch` when the request is:
+
+- a one-off additive creative build
+- several related layer/property mutations that belong in one undo group
+- too large for many low-level roundtrips, but still expressible through the internal operation allowlist
+
+Do not use `runOperationBatch` when the request is:
+
+- already covered by a stable wrapper
+- a simple single-command mutation
+- dependent on arbitrary JSX behavior that is not in the allowlist
+
+Current V6 allowlist includes:
+
+- `createShapeLayer`
+- `createTextLayer`
+- `createSolidLayer`
+- `setLayerProperties`
+- `setLayerKeyframe`
+- `setLayerExpression`
+- `deleteLayer`
+- `duplicateLayer`
+- `clearLayerSelection`
+- `selectLayers`
+- `setCompositionProperties`
 
 ## Prompt Interpretation
 
@@ -127,6 +156,12 @@ High-value wrappers:
 - `setup-retiming-mode`
 - `create-dropdown-controller`
 - `link-opacity-to-dropdown`
+
+Transaction + validation helpers:
+
+- `runOperationBatch`
+- `runtime-layer-details`
+- exact-target `getLayerInfo` by `layerName` or `layerIndex`
 
 ## Preferred Targeting
 
@@ -209,7 +244,7 @@ Inspect AE project state first when the request depends on existing context, suc
 
 - render and Media Encoder flows are still not first-class wrapper tools
 - some effect workflows remain lower-level than the new v2 wrappers
-- runtime AE validation is still the required final check for newly added wrappers
+- live AE smoke validation is still the required final release gate for V6 changes
 
 ## Working Rule
 

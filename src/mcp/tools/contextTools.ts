@@ -109,6 +109,69 @@ export function registerContextTools(deps: {
   );
 
   server.tool(
+    "runtime-layer-details",
+    "Fetch exact live layer details in one round trip for validation after mutations or transactions.",
+    {
+      ...LayerTargetingSchema
+    },
+    async (parameters: Record<string, unknown>) => {
+      const executed = await executeBridgeCommandAndWait("getLayerDetails", parameters, {
+        timeoutMs: 10000,
+        maxAttempts: 2
+      });
+
+      const layer = executed.result?.layer || null;
+      const payload = {
+        source: "runtime-layer-details",
+        message: executed.ok ? "Layer details resolved successfully." : String(executed.result?.message || "Layer detail lookup failed."),
+        summary: {
+          composition: executed.result?.composition || null,
+          layer: layer
+            ? {
+                index: layer.index ?? null,
+                name: layer.name ?? null,
+                type: layer.type ?? null,
+                parent: layer.parent || null
+              }
+            : null,
+          timing: layer
+            ? {
+                inPoint: layer.inPoint ?? null,
+                outPoint: layer.outPoint ?? null,
+                startTime: layer.startTime ?? null,
+                stretch: layer.stretch ?? null
+              }
+            : null,
+          transform: layer?.transform || null,
+          effectCount: Array.isArray(layer?.effects) ? layer.effects.length : 0,
+          maskCount: Array.isArray(layer?.masks) ? layer.masks.length : 0,
+          expressions: Array.isArray(layer?.expressions) ? layer.expressions : [],
+          warnings: Array.isArray(executed.result?.warnings) ? executed.result.warnings : []
+        },
+        data: {
+          composition: executed.result?.composition || null,
+          layer
+        },
+        meta: {
+          retries: executed.retries,
+          failureClass: executed.failureClass || null
+        }
+      };
+
+      return formatToolPayload(
+        executed.ok ? buildResultEnvelope(payload) : buildErrorEnvelope({
+          source: payload.source,
+          message: String(payload.message),
+          summary: payload.summary,
+          data: payload.data,
+          meta: payload.meta
+        }),
+        !executed.ok
+      );
+    }
+  );
+
+  server.tool(
     "get-project-items",
     "List project items with optional type and name filters.",
     {
@@ -267,13 +330,21 @@ export function registerContextTools(deps: {
       const route = resolveExecutionRoute(request, explicitIntent);
       return formatToolPayload(buildResultEnvelope({
         source: "classify-intent",
-        message: route.routeReady ? "Execution route classified successfully." : "No ready execution route found.",
+        message: route.routeReady
+          ? "Execution route classified successfully."
+          : (route.preferredRoute === "raw-jsx-fallback"
+              ? "No ready wrapper, low-level, or transaction route was found."
+              : "Transaction route is recommended, but no deterministic wrapper plan was produced."),
         summary: {
           intent: route.classified.intent,
           domain: route.classified.domain,
           confidence: route.classified.confidence,
           candidateCount: route.wrapperCandidates.length,
-          selectedWrapperId: route.selectedWrapperId
+          selectedWrapperId: route.selectedWrapperId,
+          preferredRoute: route.preferredRoute,
+          transactionEligible: route.transactionEligible,
+          recommendedCommand: route.recommendedCommand,
+          routingReasons: route.routingReasons
         },
         data: {
           route
@@ -296,18 +367,25 @@ export function registerContextTools(deps: {
       const plan = buildOrchestrationPlan(classified, parameters);
       return formatToolPayload(buildResultEnvelope({
         source: "build-execution-plan",
-        message: plan.steps.length > 0 ? "Execution plan built successfully." : "No execution steps were produced.",
+        message: plan.steps.length > 0
+          ? "Execution plan built successfully."
+          : (route.preferredRoute === "transaction"
+              ? "No deterministic wrapper plan was produced; use runOperationBatch for this one-off multi-step workflow."
+              : "No execution steps were produced."),
         summary: {
           intent: classified.intent,
           domain: classified.domain,
           stepCount: plan.steps.length,
-          selectedWrapperId: route.selectedWrapperId
+          selectedWrapperId: route.selectedWrapperId,
+          preferredRoute: route.preferredRoute,
+          transactionEligible: route.transactionEligible,
+          recommendedCommand: route.recommendedCommand
         },
         data: {
           route,
           plan
         }
-      }), plan.steps.length === 0);
+      }), plan.steps.length === 0 && route.preferredRoute !== "transaction");
     }
   );
 
@@ -325,11 +403,17 @@ export function registerContextTools(deps: {
       if (classified.intent === "unknown") {
         return formatToolPayload(buildErrorEnvelope({
           source: "orchestrate-request",
-          message: "Unsupported orchestration intent for the provided request.",
+          message: route.preferredRoute === "transaction"
+            ? "No deterministic wrapper orchestration exists for this request. Use runOperationBatch as the preferred next route."
+            : "Unsupported orchestration intent for the provided request.",
           summary: {
             intent: classified.intent,
             domain: classified.domain,
-            selectedWrapperId: route.selectedWrapperId
+            selectedWrapperId: route.selectedWrapperId,
+            preferredRoute: route.preferredRoute,
+            transactionEligible: route.transactionEligible,
+            recommendedCommand: route.recommendedCommand,
+            routingReasons: route.routingReasons
           },
           data: {
             route
@@ -366,6 +450,9 @@ export function registerContextTools(deps: {
           intent: classified.intent,
           domain: classified.domain,
           selectedWrapperId: route.selectedWrapperId,
+          preferredRoute: route.preferredRoute,
+          transactionEligible: route.transactionEligible,
+          recommendedCommand: route.recommendedCommand,
           stepCount: plan.steps.length,
           retries: executed.retries,
           failureClass: executed.failureClass || null

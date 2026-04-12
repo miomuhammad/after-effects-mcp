@@ -80,6 +80,39 @@ export function buildErrorEnvelope(input: {
 }
 
 function summarizeChanges(result: any): string[] {
+  if (typeof result?.transactionId === "string" && typeof result?.operationCount === "number") {
+    const summary: string[] = [];
+    const created = Array.isArray(result?.created) ? result.created : [];
+    const changed = Array.isArray(result?.changed) ? result.changed : [];
+    const maxChangedEntries = 6;
+
+    if (created.length > 0) {
+      const createdLabels = created
+        .slice(0, 3)
+        .map((entry: any) => `${String(entry?.type || "item")} ${String(entry?.name || "").trim()}`.trim());
+      summary.push(`Created ${created.length} item(s).${createdLabels.length ? ` ${createdLabels.join(", ")}` : ""}`);
+    }
+
+    for (const entry of changed.slice(0, maxChangedEntries)) {
+      summary.push(String(entry));
+    }
+    if (changed.length > maxChangedEntries) {
+      summary.push(`...and ${changed.length - maxChangedEntries} more change(s).`);
+    }
+
+    if (typeof result?.failedCount === "number" && result.failedCount > 0) {
+      summary.push(`${result.failedCount} operation(s) failed.`);
+    }
+    if (typeof result?.skippedCount === "number" && result.skippedCount > 0) {
+      summary.push(`${result.skippedCount} operation(s) were skipped.`);
+    }
+
+    if (!summary.length && typeof result?.message === "string" && result.message.trim()) {
+      summary.push(result.message.trim());
+    }
+    return summary;
+  }
+
   if (Array.isArray(result?.changed) && result.changed.length > 0) {
     return result.changed.map((entry: unknown) => String(entry));
   }
@@ -93,6 +126,29 @@ function summarizeChanges(result: any): string[] {
 }
 
 function extractTargetSummary(result: any): Record<string, unknown> | null {
+  if (typeof result?.transactionId === "string" && typeof result?.operationCount === "number") {
+    const touchedLayers = Array.isArray(result?.touchedLayers)
+      ? result.touchedLayers.map((layer: any) => ({
+          index: layer?.index ?? null,
+          name: layer?.name ?? null,
+          type: layer?.type ?? null,
+          composition: layer?.composition
+            ? {
+                index: layer.composition?.index ?? null,
+                name: layer.composition?.name ?? null
+              }
+            : null
+        }))
+      : [];
+
+    return {
+      composition: result?.composition || null,
+      operationCount: result?.operationCount ?? null,
+      touchedLayerCount: touchedLayers.length,
+      touchedLayers: touchedLayers.slice(0, 8)
+    };
+  }
+
   if (result?.target && typeof result.target === "object") {
     return result.target;
   }
@@ -111,6 +167,14 @@ function inferNextAction(result: any): string | null {
   if (result?.status === "waiting") {
     return "Wait a few seconds and call get-results again.";
   }
+  if (typeof result?.transactionId === "string" && typeof result?.operationCount === "number") {
+    if (typeof result?.failedCount === "number" && result.failedCount > 0) {
+      return "Inspect failedOperations, then validate one touched layer with runtime-layer-details before retrying.";
+    }
+    if (Array.isArray(result?.touchedLayers) && result.touchedLayers.length > 0) {
+      return "Use touchedLayers in the result or call runtime-layer-details for an exact follow-up check.";
+    }
+  }
   if (result?.status === "error") {
     return "Inspect the structured error details and bridge log before retrying.";
   }
@@ -122,13 +186,33 @@ function inferNextAction(result: any): string | null {
 
 export function formatUserFacingResult(result: any) {
   const status = result?.status === "error" ? "error" : (result?.status || "success");
+  const isTransactionResult = typeof result?.transactionId === "string" && typeof result?.operationCount === "number";
   return {
     status,
     summary: {
       whatChanged: summarizeChanges(result),
       targetUsed: extractTargetSummary(result),
       warnings: Array.isArray(result?.warnings) ? result.warnings : [],
-      nextAction: inferNextAction(result)
+      nextAction: inferNextAction(result),
+      transaction: isTransactionResult
+        ? {
+            transactionId: result.transactionId,
+            operationCount: result.operationCount ?? null,
+            succeededCount: result.succeededCount ?? null,
+            failedCount: result.failedCount ?? null,
+            skippedCount: result.skippedCount ?? null,
+            composition: result.composition || null,
+            touchedLayerCount: Array.isArray(result?.touchedLayers) ? result.touchedLayers.length : 0
+          }
+        : null,
+      validationTargets: isTransactionResult && Array.isArray(result?.touchedLayers)
+        ? result.touchedLayers.slice(0, 8).map((layer: any) => ({
+            index: layer?.index ?? null,
+            name: layer?.name ?? null,
+            type: layer?.type ?? null,
+            composition: layer?.composition?.name ?? null
+          }))
+        : []
     },
     result
   };
